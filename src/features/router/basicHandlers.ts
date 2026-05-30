@@ -762,8 +762,65 @@ export function registerBasicHandlers(bot: any, deps: any) {
   });
 
   bot.action(/admin:roles:(\d+)/, async (ctx: any) => {
-    state.set(ctx.from.id, { mode: "admin_set_roles", payload: { userId: Number(ctx.match[1]) } });
-    await ctx.reply("Введите роли через запятую: DOBIVER,SELLER,LANDLORD,CHATER,ADMIN");
+    const userId = Number(ctx.match[1]);
+    const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    if (!target) return void (await ctx.answerCbQuery("Пользователь не найден", { show_alert: true }).catch(() => null));
+    const roleTitles: Record<string, string> = {
+      ADMIN: "Администратор",
+      DOBIVER: "Добивер",
+      SELLER: "Продавец",
+      LANDLORD: "Арендодатель",
+      CHATER: "Чатер",
+    };
+    const roles = ["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"];
+    const assigned = new Set(
+      (db.prepare("SELECT role FROM user_roles WHERE user_id = ?").all(userId) as Array<{ role: string }>).map((x) => x.role),
+    );
+    const kb = Markup.inlineKeyboard([
+      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✅" : "☑️"} ${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}`)]),
+      [Markup.button.callback("♻️ Обновить", `admin:roles:${userId}`)],
+    ]);
+    const text =
+      `🎛️ <b>Выдача ролей</b>\n` +
+      `├ Пользователь: <b>@${target.tg_username || target.tg_id}</b>\n` +
+      `╰ ID: <b>${target.id}</b>\n\n` +
+      `Нажмите на роль, чтобы выдать или снять.`;
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb.reply_markup }).catch(() => null);
+    await ctx.answerCbQuery().catch(() => null);
+  });
+
+  bot.action(/admin:roles:toggle:(\d+):([A-Z_]+)/, async (ctx: any) => {
+    const userId = Number(ctx.match[1]);
+    const role = String(ctx.match[2]);
+    const allowed = new Set(["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"]);
+    if (!allowed.has(role)) return void (await ctx.answerCbQuery("Неизвестная роль", { show_alert: true }).catch(() => null));
+    const exists = db.prepare("SELECT 1 FROM user_roles WHERE user_id = ? AND role = ?").get(userId, role) as any;
+    if (exists) db.prepare("DELETE FROM user_roles WHERE user_id = ? AND role = ?").run(userId, role);
+    else db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, ?)").run(userId, role);
+    db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, 'USER')").run(userId);
+    const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    const roleTitles: Record<string, string> = {
+      ADMIN: "Администратор",
+      DOBIVER: "Добивер",
+      SELLER: "Продавец",
+      LANDLORD: "Арендодатель",
+      CHATER: "Чатер",
+    };
+    const roles = ["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"];
+    const assigned = new Set(
+      (db.prepare("SELECT role FROM user_roles WHERE user_id = ?").all(userId) as Array<{ role: string }>).map((x) => x.role),
+    );
+    const kb = Markup.inlineKeyboard([
+      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✅" : "☑️"} ${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}`)]),
+      [Markup.button.callback("♻️ Обновить", `admin:roles:${userId}`)],
+    ]);
+    const text =
+      `🎛️ <b>Выдача ролей</b>\n` +
+      `├ Пользователь: <b>@${target?.tg_username || target?.tg_id || userId}</b>\n` +
+      `╰ ID: <b>${target?.id || userId}</b>\n\n` +
+      `Нажмите на роль, чтобы выдать или снять.`;
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb.reply_markup }).catch(() => null);
+    await ctx.answerCbQuery(exists ? "Роль снята" : "Роль выдана").catch(() => null);
   });
 
   bot.action(/panel:yes:(\d+)/, async (ctx: any) => {

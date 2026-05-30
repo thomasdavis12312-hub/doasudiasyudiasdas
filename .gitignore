@@ -1,0 +1,9 @@
+@"
+node_modules/
+dist/
+.tmp-steam-*/
+.tmp-steam-template-*/
+*.log
+.env
+bot.db
+"@ | Out-File -Encoding utf8 .gitignore

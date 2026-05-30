@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleType {
+  ADMIN
+  WORKER
+  SELLER
+  LANDLORD
+  CHATER
+  USER
+}
+
+enum JoinRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum WorkRequestStatus {
+  PENDING
+  TAKEN
+  COMPLETED
+  FAILED
+  AFK
+  REJECTED
+}
+
+model User {
+  id                Int        @id @default(autoincrement())
+  tgId              BigInt     @unique
+  tgUsername        String?
+  discordTag        String?
+  language          String     @default("ru")
+  isApproved        Boolean    @default(false)
+  registeredAt      DateTime   @default(now())
+  profileViews      Int        @default(0)
+  sessionsGiven     Int        @default(0)
+  sessionsTaken     Int        @default(0)
+  sessionsFailed    Int        @default(0)
+  totalGivenUsd     Float      @default(0)
+  totalTakenUsd     Float      @default(0)
+  totalFailedUsd    Float      @default(0)
+  totalDodepUsd     Float      @default(0)
+  totalDodepYuan    Float      @default(0)
+  workerTaken       Int        @default(0)
+  workerFailed      Int        @default(0)
+  workerTakenUsd    Float      @default(0)
+  workerFailedUsd   Float      @default(0)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  roles             UserRole[]
+  joinRequests      JoinRequest[]
+  workRequests      WorkRequest[] @relation("OwnerWorkRequests")
+  takenWorkRequests WorkRequest[] @relation("WorkerWorkRequests")
+}
+
+model UserRole {
+  id      Int      @id @default(autoincrement())
+  userId  Int
+  role    RoleType
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+}
+
+model JoinRequest {
+  id          Int               @id @default(autoincrement())
+  number      Int               @unique
+  userId      Int
+  discordTag  String
+  status      JoinRequestStatus @default(PENDING)
+  reason      String?
+  createdAt   DateTime          @default(now())
+  reviewedAt  DateTime?
+  reviewedBy  Int?
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WorkRequest {
+  id                Int               @id @default(autoincrement())
+  number            Int               @unique
+  ownerId           Int
+  workerId          Int?
+  steamId           String
+  amountUsd         Float
+  region            String
+  status            WorkRequestStatus @default(PENDING)
+  rejectionReason   String?
+  failReason        String?
+  botLink           String?
+  dodepUsd          Float             @default(0)
+  dodepYuan         Float             @default(0)
+  createdAt         DateTime          @default(now())
+  takenAt           DateTime?
+  closedAt          DateTime?
+
+  owner             User              @relation("OwnerWorkRequests", fields: [ownerId], references: [id], onDelete: Cascade)
+  worker            User?             @relation("WorkerWorkRequests", fields: [workerId], references: [id], onDelete: SetNull)
+}
+
+model BotSettings {
+  id                         Int      @id @default(1)
+  usersCounterOverride       Int?
+  notifyNewJoinRequest       Boolean  @default(true)
+  notifyNewWorkRequest       Boolean  @default(true)
+  notifySaleSuccess          Boolean  @default(true)
+  notifySessionSuccess       Boolean  @default(true)
+  notifySessionFail          Boolean  @default(true)
+  updatedAt                  DateTime @updatedAt
+}

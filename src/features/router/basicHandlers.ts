@@ -253,6 +253,35 @@ export function registerBasicHandlers(bot: any, deps: any) {
     );
   });
 
+  bot.command("unregister", async (ctx: any) => {
+    const me = ensureUser(ctx);
+    if (!me || !hasRole(me, ["ADMIN"])) return;
+    const q = ctx.message.text.split(" ").slice(1).join(" ").trim();
+    if (!q) {
+      await ctx.reply(
+        `<tg-emoji emoji-id="5239948611806081116">ℹ️</tg-emoji> <b>Использование: /unregister</b> DISCORD/@Username/ID`,
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+    const target = getUserByQuery(db as any, q);
+    if (!target) {
+      await ctx.reply("Пользователь не найден.");
+      return;
+    }
+    if (Number(target.id) === Number(me.id)) {
+      await ctx.reply("Нельзя сбросить регистрацию самому себе этой командой.");
+      return;
+    }
+
+    db.prepare("DELETE FROM join_requests WHERE user_id = ? AND status = 'PENDING'").run(target.id);
+    db.prepare("UPDATE users SET is_approved = 0, discord_tag = '-', discord_id = NULL, discord_avatar_url = NULL WHERE id = ?").run(target.id);
+    await syncChatCommandsForUser(bot, { ...target, is_approved: 0 }, (u: any) => hasRole(u, ["ADMIN"]));
+    await ctx.reply(
+      `✅ Регистрация сброшена для #${target.id} @${target.tg_username || target.tg_id}\nТеперь пользователь должен заново привязать Discord через /start.`,
+    );
+  });
+
   bot.action(/queue:(\d+)/, async (ctx: any) => {
     const req = db.prepare("SELECT * FROM work_requests WHERE id = ?").get(Number(ctx.match[1])) as any;
     if (!req || req.status !== "PENDING") return void (await ctx.answerCbQuery("Заявка уже обработана"));

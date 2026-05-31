@@ -1909,8 +1909,11 @@ async function renderOwnProfile(ctx: Ctx, me: any) {
     parse_mode: "HTML" as const,
     reply_markup: Markup.inlineKeyboard([[Markup.button.callback(`Отображение в ${next}`, "profile:currency:toggle")]]).reply_markup,
   };
-  // Discord CDN avatars can intermittently fail in Telegram (wrong type of web page content),
-  // which breaks profile flow for some users. Keep profile delivery stable by sending text only.
+  const avatarUrl = String(refreshed.discord_avatar_url || "").trim();
+  if (avatarUrl) {
+    const sent = await ctx.replyWithPhoto(avatarUrl, { caption: text, ...extra }).catch(() => null);
+    if (sent) return sent;
+  }
   return ctx.reply(text, extra);
 }
 

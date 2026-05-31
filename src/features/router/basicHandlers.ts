@@ -112,6 +112,11 @@ export function registerBasicHandlers(bot: any, deps: any) {
     if (!row) return void (await ctx.reply("Пользователь не найден."));
     incrementProfileViews(db as any, row.id);
     const text = await formatProfile(row);
+    const avatarUrl = String(row.discord_avatar_url || "").trim();
+    if (avatarUrl) {
+      const sent = await ctx.replyWithPhoto(avatarUrl, { caption: text, parse_mode: "HTML" }).catch(() => null);
+      if (sent) return;
+    }
     await ctx.reply(text, { parse_mode: "HTML" });
   });
 
@@ -698,6 +703,14 @@ export function registerBasicHandlers(bot: any, deps: any) {
     const reviewer = db.prepare("SELECT * FROM users WHERE id = ?").get(Number(ctx.match[1])) as any;
     if (!reviewer) return void (await ctx.answerCbQuery("Пользователь не найден"));
     const profile = await formatProfile(reviewer);
+    const avatarUrl = String(reviewer.discord_avatar_url || "").trim();
+    if (avatarUrl) {
+      const sent = await ctx.replyWithPhoto(avatarUrl, { caption: profile, parse_mode: "HTML" }).catch(() => null);
+      if (sent) {
+        await ctx.answerCbQuery().catch(() => null);
+        return;
+      }
+    }
     await ctx.reply(profile, { parse_mode: "HTML" }).catch(() => null);
     await ctx.answerCbQuery().catch(() => null);
   });

@@ -407,16 +407,17 @@ async function createJoinRequestForUser(user: any, discordTag: string) {
     `<tg-emoji emoji-id="5240106271465582633">🆕</tg-emoji> <b>Новая заявка №${num} на вступление</b>\n` +
     `├ Пользователь: <b>@${user.tg_username || user.tg_id}</b>\n` +
     `╰ Discord: <b>${discordTag}</b>`;
-  for (const a of ADMIN_IDS) {
-    const adminUser = db.prepare("SELECT id FROM users WHERE tg_id = ?").get(a) as any;
-    if (adminUser) {
-      ensureNotificationPrefs(Number(adminUser.id));
-      const pref = db.prepare("SELECT notif_join FROM notification_prefs WHERE user_id = ?").get(adminUser.id) as any;
-      if (Number(pref?.notif_join ?? 1) !== 1) continue;
-    }
+  const admins = db
+    .prepare(
+      "SELECT DISTINCT u.id, u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role = 'ADMIN' AND IFNULL(u.is_banned,0)=0 AND IFNULL(np.notif_join,1)=1",
+    )
+    .all() as any[];
+  for (const a of admins) {
+    const adminTgId = Number(a?.tg_id || 0);
+    if (!adminTgId) continue;
     const sent = await bot.telegram
       .sendMessage(
-        a,
+        adminTgId,
         joinCardText,
         {
           parse_mode: "HTML",
@@ -428,7 +429,7 @@ async function createJoinRequestForUser(user: any, discordTag: string) {
       .catch(() => null as any);
     if (sent?.message_id) {
       db.prepare("INSERT INTO join_request_messages (join_request_id, admin_tg_id, message_id) VALUES (?, ?, ?)")
-        .run(ins.lastInsertRowid, a, sent.message_id);
+        .run(ins.lastInsertRowid, adminTgId, sent.message_id);
     }
   }
 }
@@ -2608,10 +2609,17 @@ bot.on("text", async (ctx) => {
       `<tg-emoji emoji-id="5240106271465582633">🆕</tg-emoji> <b>Новая заявка №${num} на вступление</b>\n` +
       `├ Пользователь: <b>@${me.tg_username || me.tg_id}</b>\n` +
       `╰ Discord: <b>${text.trim() || "-"}</b>`;
-    for (const a of ADMIN_IDS) {
+    const admins = db
+      .prepare(
+        "SELECT DISTINCT u.id, u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role = 'ADMIN' AND IFNULL(u.is_banned,0)=0 AND IFNULL(np.notif_join,1)=1",
+      )
+      .all() as any[];
+    for (const a of admins) {
+      const adminTgId = Number(a?.tg_id || 0);
+      if (!adminTgId) continue;
       const sent = await bot.telegram
         .sendMessage(
-          a,
+          adminTgId,
           joinCardText,
           {
             parse_mode: "HTML",
@@ -2623,7 +2631,7 @@ bot.on("text", async (ctx) => {
         .catch(() => null as any);
       if (sent?.message_id) {
         db.prepare("INSERT INTO join_request_messages (join_request_id, admin_tg_id, message_id) VALUES (?, ?, ?)")
-          .run(ins.lastInsertRowid, a, sent.message_id);
+          .run(ins.lastInsertRowid, adminTgId, sent.message_id);
       }
     }
     return;
@@ -3072,6 +3080,7 @@ bot.on("text", async (ctx) => {
         })
         .catch(() => null);
     }
+    await ctx.reply("❌ Заявка отклонена.").catch(() => null);
     state.delete(ctx.from.id);
     return;
   }

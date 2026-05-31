@@ -10,7 +10,7 @@ export async function configureBotCommands(bot: Telegraf<any>, adminIds: number[
     { command: "start", description: "Открыть главное меню" },
     { command: "help", description: "Помощь" },
     { command: "user", description: "Посмотреть профиль" },
-    { command: "d", description: "Создать заявку на работу" },
+    { command: "d", description: "Отдать на добив" },
     { command: "c", description: "Проверка на панели" },
     { command: "o", description: "Чекер онлайна (быстро)" },
     { command: "guard", description: "Посмотреть Guard-код" },
@@ -23,7 +23,6 @@ export async function configureBotCommands(bot: Telegraf<any>, adminIds: number[
       [
         ...userCmds,
         { command: "admin", description: "Админ-панель" },
-        { command: "z", description: "Тест заявки на вступление" },
         { command: "stop", description: "Остановить диалог" },
       ],
       { scope: { type: "chat", chat_id: adminTgId } as any },
@@ -45,7 +44,7 @@ export async function syncChatCommandsForUser(
     { command: "start", description: "Открыть главное меню" },
     { command: "help", description: "Помощь" },
     { command: "user", description: "Посмотреть профиль" },
-    { command: "d", description: "Создать заявку на работу" },
+    { command: "d", description: "Отдать на добив" },
     { command: "c", description: "Проверка на панели" },
     { command: "o", description: "Чекер онлайна (быстро)" },
     { command: "guard", description: "Посмотреть Guard-код" },
@@ -56,7 +55,6 @@ export async function syncChatCommandsForUser(
         [
           ...userCmds,
           { command: "admin", description: "Админ-панель" },
-          { command: "z", description: "Тест заявки на вступление" },
           { command: "stop", description: "Остановить диалог" },
         ],
         chatScope,

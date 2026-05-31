@@ -738,6 +738,10 @@ export function registerBasicHandlers(bot: any, deps: any) {
     const userId = Number(ctx.match[1]);
     const returnPage = Number((ctx.match as any)?.[2] || 0) || 0;
     const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    if (!target || !target.is_approved || !String(target.discord_tag || "").trim() || String(target.discord_tag || "").trim() === "-") {
+      await ctx.answerCbQuery("Права можно выдавать только зарегистрированным пользователям", { show_alert: true }).catch(() => null);
+      return;
+    }
     if (!target) return void (await ctx.answerCbQuery("Пользователь не найден", { show_alert: true }).catch(() => null));
     const roleTitles: Record<string, string> = {
       ADMIN: "Администратор",
@@ -774,6 +778,10 @@ export function registerBasicHandlers(bot: any, deps: any) {
     else db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, ?)").run(userId, role);
     db.prepare("INSERT OR IGNORE INTO user_roles (user_id, role) VALUES (?, 'USER')").run(userId);
     const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    if (!target || !target.is_approved || !String(target.discord_tag || "").trim() || String(target.discord_tag || "").trim() === "-") {
+      await ctx.answerCbQuery("Права можно выдавать только зарегистрированным пользователям", { show_alert: true }).catch(() => null);
+      return;
+    }
     const roleTitles: Record<string, string> = {
       ADMIN: "Администратор",
       DOBIVER: "Добивер",

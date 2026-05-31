@@ -1931,19 +1931,19 @@ function formatAdminListDate(iso: string | null | undefined): string {
 
 async function renderAdminUsersPage(ctx: Ctx, pageRaw = 0) {
   const pageSize = 10;
-  const total = Number((db.prepare("SELECT COUNT(*) c FROM users").get() as any)?.c || 0);
+  const total = Number((db.prepare("SELECT COUNT(*) c FROM users WHERE is_approved = 1 AND IFNULL(discord_tag,'') <> '' AND IFNULL(discord_tag,'-') <> '-'").get() as any)?.c || 0);
   const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
   const page = Math.max(0, Math.min(pageRaw, maxPage));
   const offset = page * pageSize;
   const rows = db
-    .prepare("SELECT id, tg_username, discord_tag, registered_at FROM users ORDER BY id DESC LIMIT ? OFFSET ?")
+    .prepare("SELECT id, tg_username, discord_tag, registered_at FROM users WHERE is_approved = 1 AND IFNULL(discord_tag,'') <> '' AND IFNULL(discord_tag,'-') <> '-' ORDER BY id DESC LIMIT ? OFFSET ?")
     .all(pageSize, offset) as any[];
 
   const kbRows: any[] = rows.map((r) => {
     const rawDiscord = String(r.discord_tag || "-").trim();
     const discord = rawDiscord === "-" ? "-" : rawDiscord.startsWith("#") ? rawDiscord : `#${rawDiscord}`;
-    const dateLabel = formatAdminListDate(r.registered_at);
-    return [Markup.button.callback(`${discord} | ${dateLabel}`, `admin:usercard:${r.id}:${page}`)];
+    const tgUsername = String(r.tg_username || "-").trim() || "-";
+    return [Markup.button.callback(`#${r.id} ${discord} | ${tgUsername}`, `admin:usercard:${r.id}:${page}`)];
   });
   if (maxPage > 0) {
     kbRows.push([
@@ -1955,6 +1955,46 @@ async function renderAdminUsersPage(ctx: Ctx, pageRaw = 0) {
   kbRows.push([Markup.button.callback("🔎 Поиск", `admin:userlist:search:${page}`)]);
 
   const text = `<b>Пользователи</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>`;
+  if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
+    await (ctx as any)
+      .editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(kbRows).reply_markup,
+      })
+      .catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(kbRows).reply_markup }).catch(() => null);
+      });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(kbRows).reply_markup });
+  }
+}
+
+async function renderJoinRequestsPage(ctx: Ctx, pageRaw = 0) {
+  const pageSize = 10;
+  const total = Number((db.prepare("SELECT COUNT(*) c FROM join_requests WHERE status = 'PENDING'").get() as any)?.c || 0);
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  const page = Math.max(0, Math.min(pageRaw, maxPage));
+  const offset = page * pageSize;
+  const rows = db
+    .prepare(
+      "SELECT jr.id, jr.number, jr.discord_tag, u.tg_username, u.tg_id FROM join_requests jr LEFT JOIN users u ON u.id = jr.user_id WHERE jr.status = 'PENDING' ORDER BY jr.id DESC LIMIT ? OFFSET ?",
+    )
+    .all(pageSize, offset) as any[];
+
+  const kbRows: any[] = rows.map((r) => {
+    const userLabel = r.tg_username ? `@${r.tg_username}` : String(r.tg_id || "-");
+    const discord = String(r.discord_tag || "-").trim() || "-";
+    return [Markup.button.callback(`⌛️ ${userLabel} | ${discord}`, `join:list:open:${r.id}:${page}`)];
+  });
+  if (maxPage > 0) {
+    kbRows.push([
+      Markup.button.callback("⬅️", `join:list:page:${Math.max(0, page - 1)}`),
+      Markup.button.callback(`${page + 1}/${maxPage + 1}`, "join:list:noop"),
+      Markup.button.callback("➡️", `join:list:page:${Math.min(maxPage, page + 1)}`),
+    ]);
+  }
+
+  const text = `<b>Заявки на вступление</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>`;
   if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
     await (ctx as any)
       .editMessageText(text, {
@@ -2409,7 +2449,9 @@ bot.on("text", async (ctx) => {
   if (!me || me.is_banned) return;
 
   const text = ctx.message.text;
-  if (!me.is_approved || !hasLinkedDiscord(me)) {
+  const allowAdminUnlinkedJoinFlow =
+    hasRole(me, ["ADMIN"]) && (text === "Заявки на вступление" || text === "/admin");
+  if ((!me.is_approved || !hasLinkedDiscord(me)) && !allowAdminUnlinkedJoinFlow) {
     await syncChatCommandsForUser(bot, me, (u) => hasRole(u, ["ADMIN"]));
     if (text !== "/start") await ctx.reply("❗️Сначала привяжите Discord через /start.");
     return;
@@ -3206,6 +3248,10 @@ bot.on("text", async (ctx) => {
     await renderAdminStats(ctx, "all");
     return;
   }
+  if (text === "Заявки на вступление" && hasRole(me, ["ADMIN"])) {
+    await renderJoinRequestsPage(ctx, 0);
+    return;
+  }
   if (text === "Заявки на работу" && hasRole(me, ["ADMIN"])) {
     adminReqListState.set(ctx.from.id, { kind: "work", query: "" });
     await renderAdminRequestList(ctx, "work", 0, "");
@@ -3398,6 +3444,40 @@ bot.on("callback_query", async (ctx, next) => {
   }
 
   if (data === "admin:userlist:noop") {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data === "join:list:noop" && hasRole(me, ["ADMIN"])) {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data.startsWith("join:list:page:") && hasRole(me, ["ADMIN"])) {
+    const page = Number(data.split(":").pop() || 0);
+    await renderJoinRequestsPage(ctx, Number.isFinite(page) ? page : 0);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data.startsWith("join:list:open:") && hasRole(me, ["ADMIN"])) {
+    const parts = data.split(":");
+    const joinRequestId = Number(parts[3] || 0);
+    const page = Number(parts[4] || 0);
+    const req = db.prepare("SELECT jr.*, u.tg_username, u.tg_id FROM join_requests jr LEFT JOIN users u ON u.id = jr.user_id WHERE jr.id = ?").get(joinRequestId) as any;
+    if (!req) {
+      await ctx.answerCbQuery("Заявка не найдена", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const userLabel = req.tg_username ? `@${req.tg_username}` : String(req.tg_id || "-");
+    const text =
+      `<tg-emoji emoji-id="5239948611806081116">❗️</tg-emoji> <b>Новая заявка №${req.number} на вступление</b>\n` +
+      `├ Пользователь: <b>${escapeHtml(userLabel)}</b>\n` +
+      `╰ Discord: <b>${escapeHtml(req.discord_tag || "-")}</b>`;
+    await ctx.editMessageText(text, {
+      parse_mode: "HTML",
+      reply_markup: Markup.inlineKeyboard([
+        [Markup.button.callback("✅ Принять", `join:approve:${joinRequestId}`), Markup.button.callback("❌ Отклонить", `join:reject:${joinRequestId}`)],
+        [Markup.button.callback("⬅️ Назад", `join:list:page:${Math.max(0, page)}`)],
+      ]).reply_markup,
+    }).catch(() => null);
     await ctx.answerCbQuery().catch(() => null);
     return;
   }

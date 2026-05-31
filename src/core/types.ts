@@ -1,2 +1,1 @@
-﻿export type Role = "ADMIN" | "DOBIVER" | "SELLER" | "LANDLORD" | "CHATER" | "USER";
-
+export type Role = "ADMIN" | "DOBIVER" | "LANDLORD" | "CHATER" | "USER";

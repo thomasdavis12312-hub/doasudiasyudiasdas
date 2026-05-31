@@ -12,7 +12,6 @@ export function registerBasicHandlers(bot: any, deps: any) {
     buildDiscordAuthUrl,
     escapeHtml,
     mainKb,
-    langInlineKb,
     adminKb,
     syncChatCommandsForUser,
     formatProfile,
@@ -38,15 +37,15 @@ export function registerBasicHandlers(bot: any, deps: any) {
     if (me.is_banned) return void (await ctx.reply("You are banned."));
     if (!me.is_approved) {
       const oauthUrl = buildDiscordAuthUrl(me.tg_id);
-      await ctx.reply("You need to link Discord before using the bot.", {
+      await ctx.reply("<b>❗️Перед использованием бота необходимо привязать Discord.</b>", {
+        parse_mode: "HTML",
         reply_markup: oauthUrl
-          ? Markup.inlineKeyboard([[Markup.button.url("Link Discord", oauthUrl)]]).reply_markup
-          : Markup.inlineKeyboard([[Markup.button.callback("Link Discord", "register:discord:unavailable")]]).reply_markup,
+          ? Markup.inlineKeyboard([[Markup.button.url("Привязать Discord", oauthUrl)]]).reply_markup
+          : Markup.inlineKeyboard([[Markup.button.callback("Привязать Discord", "register:discord:unavailable")]]).reply_markup,
       });
       return;
     }
     const count = db.prepare("SELECT COUNT(*) c FROM users WHERE is_approved = 1").get() as any;
-    const lang = String(me.language || "ru").toLowerCase() === "en" ? "en" : "ru";
     await ctx.reply("👋", mainKb);
     await ctx.reply(
       `<b>🙏 Добро пожаловать в <a href="https://discord.gg/criminalchina">CC TEAM BOT</a>.</b>\n` +
@@ -54,7 +53,6 @@ export function registerBasicHandlers(bot: any, deps: any) {
       {
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
-        reply_markup: langInlineKb(lang).reply_markup,
       },
     );
   });
@@ -78,8 +76,12 @@ export function registerBasicHandlers(bot: any, deps: any) {
 
   bot.command("admin", async (ctx: any) => {
     const me = ensureUser(ctx);
-    if (!me || !hasRole(me, ["ADMIN"])) return;
-    await ctx.reply("⚙️ Админ-панель", adminKb);
+    if (!me || !hasRole(me, ["ADMIN", "LANDLORD"])) return;
+    if (hasRole(me, ["LANDLORD"]) && !hasRole(me, ["ADMIN"])) {
+      await ctx.reply("ㅤ", Markup.keyboard([["Заявки на аренду"]]).resize());
+      return;
+    }
+    await ctx.reply("ㅤ", adminKb);
   });
 
   bot.command("help", async (ctx: any) => {
@@ -267,7 +269,7 @@ export function registerBasicHandlers(bot: any, deps: any) {
 
     const adminRows = db
       .prepare(
-        "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id WHERE r.role = 'ADMIN' AND IFNULL(u.is_banned,0) = 0",
+        "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role = 'ADMIN' AND IFNULL(u.is_banned,0) = 0 AND IFNULL(np.notif_join,1)=1",
       )
       .all() as any[];
 
@@ -756,43 +758,56 @@ export function registerBasicHandlers(bot: any, deps: any) {
     await ctx.answerCbQuery(u.is_banned ? "Пользователь разблокирован" : "Пользователь заблокирован");
   });
 
-  bot.action(/admin:msg:(\d+)/, async (ctx: any) => {
-    state.set(ctx.from.id, { mode: "admin_send_msg", payload: { userId: Number(ctx.match[1]) } });
-    await ctx.reply("Введите сообщение для пользователя:");
+  bot.action(/admin:msg:(\d+)(?::(\d+))?/, async (ctx: any) => {
+    const userId = Number(ctx.match[1]);
+    const returnPage = Number(ctx.match[2] || 0) || 0;
+    const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from.id, { mode: "admin_send_msg", payload: { userId, returnPage, promptMessageId } });
+    const label = `@${target?.tg_username || target?.tg_id || userId}`;
+    const text = `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите сообщение для пользователя ${label}.</b>`;
+    await ctx
+      .editMessageText(text, { parse_mode: "HTML" })
+      .catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML" }).catch(() => null);
+      });
+    await ctx.answerCbQuery().catch(() => null);
   });
 
-  bot.action(/admin:roles:(\d+)/, async (ctx: any) => {
+  bot.action(/admin:roles:(\d+)(?::(\d+))?/, async (ctx: any) => {
     const userId = Number(ctx.match[1]);
+    const returnPage = Number((ctx.match as any)?.[2] || 0) || 0;
     const target = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
     if (!target) return void (await ctx.answerCbQuery("Пользователь не найден", { show_alert: true }).catch(() => null));
     const roleTitles: Record<string, string> = {
       ADMIN: "Администратор",
       DOBIVER: "Добивер",
-      SELLER: "Продавец",
       LANDLORD: "Арендодатель",
       CHATER: "Чатер",
     };
-    const roles = ["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"];
+    const roles = ["ADMIN", "DOBIVER", "LANDLORD", "CHATER"];
     const assigned = new Set(
       (db.prepare("SELECT role FROM user_roles WHERE user_id = ?").all(userId) as Array<{ role: string }>).map((x) => x.role),
     );
     const kb = Markup.inlineKeyboard([
-      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✅" : "☑️"} ${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}`)]),
-      [Markup.button.callback("♻️ Обновить", `admin:roles:${userId}`)],
+      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✓ " : ""}${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}:${returnPage}`)]),
+      [Markup.button.callback("◀️ Назад", `admin:usercard:${userId}:${returnPage}`)],
     ]);
     const text =
-      `🎛️ <b>Выдача ролей</b>\n` +
-      `├ Пользователь: <b>@${target.tg_username || target.tg_id}</b>\n` +
-      `╰ ID: <b>${target.id}</b>\n\n` +
+      `<b>Выдача ролей.</b>\n\n` +
+      `Пользователь: <b>@${target.tg_username || target.tg_id}</b>\n` +
+      `Discord: <b>${target.discord_tag || "-"}</b>\n` +
+      `ID: <b>${target.id}</b>\n\n` +
       `Нажмите на роль, чтобы выдать или снять.`;
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb.reply_markup }).catch(() => null);
     await ctx.answerCbQuery().catch(() => null);
   });
 
-  bot.action(/admin:roles:toggle:(\d+):([A-Z_]+)/, async (ctx: any) => {
+  bot.action(/admin:roles:toggle:(\d+):([A-Z_]+):(\d+)/, async (ctx: any) => {
     const userId = Number(ctx.match[1]);
     const role = String(ctx.match[2]);
-    const allowed = new Set(["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"]);
+    const returnPage = Number(ctx.match[3] || 0) || 0;
+    const allowed = new Set(["ADMIN", "DOBIVER", "LANDLORD", "CHATER"]);
     if (!allowed.has(role)) return void (await ctx.answerCbQuery("Неизвестная роль", { show_alert: true }).catch(() => null));
     const exists = db.prepare("SELECT 1 FROM user_roles WHERE user_id = ? AND role = ?").get(userId, role) as any;
     if (exists) db.prepare("DELETE FROM user_roles WHERE user_id = ? AND role = ?").run(userId, role);
@@ -802,22 +817,22 @@ export function registerBasicHandlers(bot: any, deps: any) {
     const roleTitles: Record<string, string> = {
       ADMIN: "Администратор",
       DOBIVER: "Добивер",
-      SELLER: "Продавец",
       LANDLORD: "Арендодатель",
       CHATER: "Чатер",
     };
-    const roles = ["ADMIN", "DOBIVER", "SELLER", "LANDLORD", "CHATER"];
+    const roles = ["ADMIN", "DOBIVER", "LANDLORD", "CHATER"];
     const assigned = new Set(
       (db.prepare("SELECT role FROM user_roles WHERE user_id = ?").all(userId) as Array<{ role: string }>).map((x) => x.role),
     );
     const kb = Markup.inlineKeyboard([
-      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✅" : "☑️"} ${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}`)]),
-      [Markup.button.callback("♻️ Обновить", `admin:roles:${userId}`)],
+      ...roles.map((r) => [Markup.button.callback(`${assigned.has(r) ? "✓ " : ""}${roleTitles[r]}`, `admin:roles:toggle:${userId}:${r}:${returnPage}`)]),
+      [Markup.button.callback("◀️ Назад", `admin:usercard:${userId}:${returnPage}`)],
     ]);
     const text =
-      `🎛️ <b>Выдача ролей</b>\n` +
-      `├ Пользователь: <b>@${target?.tg_username || target?.tg_id || userId}</b>\n` +
-      `╰ ID: <b>${target?.id || userId}</b>\n\n` +
+      `<b>Выдача ролей.</b>\n\n` +
+      `Пользователь: <b>@${target?.tg_username || target?.tg_id || userId}</b>\n` +
+      `Discord: <b>${target?.discord_tag || "-"}</b>\n` +
+      `ID: <b>${target?.id || userId}</b>\n\n` +
       `Нажмите на роль, чтобы выдать или снять.`;
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb.reply_markup }).catch(() => null);
     await ctx.answerCbQuery(exists ? "Роль снята" : "Роль выдана").catch(() => null);
@@ -831,14 +846,6 @@ export function registerBasicHandlers(bot: any, deps: any) {
     await bot.telegram.sendMessage(Number(ctx.match[1]), "❌ Ваш Steam ID не найден на панели.").catch(() => null);
   });
 
-  bot.action(/lang:set:(ru|en)/, async (ctx: any) => {
-    const me = ensureUser(ctx);
-    if (!me) return;
-    const lang = (ctx.match as RegExpMatchArray)[1];
-    db.prepare("UPDATE users SET language = ? WHERE id = ?").run(lang, me.id);
-    await ctx.answerCbQuery(lang === "ru" ? "Язык: Русский" : "Language: English").catch(() => null);
-    await ctx.editMessageReplyMarkup(langInlineKb(lang).reply_markup).catch(() => null);
-  });
 }
 
 

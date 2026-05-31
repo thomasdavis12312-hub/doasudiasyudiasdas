@@ -62,6 +62,8 @@ let onlineWatchLoopStarted = false;
 let usdRubCache = { rate: Number(process.env.USD_RUB_RATE || 90), updatedAt: 0 };
 let usdUahCache = { rate: Number(process.env.USD_UAH_RATE || 40), updatedAt: 0 };
 const uiPromptMsg = new Map<number, number>();
+const adminLogsViewState = new Map<number, { query: string }>();
+const adminReqListState = new Map<number, { kind: "work" | "panel" | "rent"; query: string }>();
 let steamBrowser: any = null;
 let steamPage: any = null;
 let steamAddFriendPage: any = null;
@@ -406,6 +408,12 @@ async function createJoinRequestForUser(user: any, discordTag: string) {
     `├ Пользователь: <b>@${user.tg_username || user.tg_id}</b>\n` +
     `╰ Discord: <b>${discordTag}</b>`;
   for (const a of ADMIN_IDS) {
+    const adminUser = db.prepare("SELECT id FROM users WHERE tg_id = ?").get(a) as any;
+    if (adminUser) {
+      ensureNotificationPrefs(Number(adminUser.id));
+      const pref = db.prepare("SELECT notif_join FROM notification_prefs WHERE user_id = ?").get(adminUser.id) as any;
+      if (Number(pref?.notif_join ?? 1) !== 1) continue;
+    }
     const sent = await bot.telegram
       .sendMessage(
         a,
@@ -509,7 +517,6 @@ function startDiscordOAuthServer() {
       db.prepare("UPDATE users SET discord_id = ?, discord_avatar_url = ? WHERE id = ?").run(discordId || null, avatarUrl, tgUser.id);
       await createJoinRequestForUser(tgUser, discordTag);
       console.log("[DISCORD OAUTH] success", { tgId: st.tgId, discordTag });
-      await bot.telegram.sendMessage(st.tgId, `✅ Discord успешно привязан: ${discordTag}`).catch(() => null);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(
         `<html><head><meta http-equiv="refresh" content="1;url=${TELEGRAM_BOT_LINK}"></head><body>` +
@@ -689,6 +696,13 @@ function initDb() {
     message_id INTEGER NOT NULL,
     UNIQUE(rental_id, user_id, admin_tg_id, message_id)
   );
+  CREATE TABLE IF NOT EXISTS notification_prefs (
+    user_id INTEGER PRIMARY KEY,
+    notif_work INTEGER DEFAULT 1,
+    notif_join INTEGER DEFAULT 1,
+    notif_panel INTEGER DEFAULT 1,
+    notif_rent INTEGER DEFAULT 1
+  );
   `);
   try {
     db.prepare("ALTER TABLE users ADD COLUMN profile_currency TEXT DEFAULT 'USD'").run();
@@ -726,6 +740,34 @@ function initDb() {
   try {
     db.prepare("UPDATE user_roles SET role = 'DOBIVER' WHERE role = 'WORKER'").run();
   } catch {}
+  try {
+    db.prepare("DELETE FROM user_roles WHERE role = 'SELLER'").run();
+  } catch {}
+}
+
+function ensureNotificationPrefs(userId: number) {
+  db.prepare(
+    "INSERT OR IGNORE INTO notification_prefs (user_id, notif_work, notif_join, notif_panel, notif_rent) VALUES (?, 1, 1, 1, 1)",
+  ).run(userId);
+}
+
+function renderNotifyText(p: any) {
+  return (
+    `<b>Уведомления</b>\n` +
+    `Новая заявка на добив: <b>${Number(p?.notif_work || 0) ? "Включено" : "Выключено"}</b>\n` +
+    `Новая заявка на вступление: <b>${Number(p?.notif_join || 0) ? "Включено" : "Выключено"}</b>\n` +
+    `Проверка на панеле: <b>${Number(p?.notif_panel || 0) ? "Включено" : "Выключено"}</b>\n` +
+    `Заявки на аренду: <b>${Number(p?.notif_rent || 0) ? "Включено" : "Выключено"}</b>`
+  );
+}
+
+function renderNotifyKb(p: any) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(`${Number(p?.notif_work || 0) ? "✅" : "❌"} Добив`, "notify:toggle:work")],
+    [Markup.button.callback(`${Number(p?.notif_join || 0) ? "✅" : "❌"} Вступление`, "notify:toggle:join")],
+    [Markup.button.callback(`${Number(p?.notif_panel || 0) ? "✅" : "❌"} Панель`, "notify:toggle:panel")],
+    [Markup.button.callback(`${Number(p?.notif_rent || 0) ? "✅" : "❌"} Заявки на аренду`, "notify:toggle:rent")],
+  ]);
 }
 
 function getUserByTgId(tgId: number) {
@@ -759,6 +801,7 @@ function ensureUser(ctx: Ctx) {
       user.is_approved = 1;
     }
   }
+  ensureNotificationPrefs(user.id);
   user.roles = rolesByUserId(user.id);
   return user;
 }
@@ -1816,7 +1859,8 @@ async function formatProfile(u: any) {
   const dodepUsd = Number(u.total_dodep_usd || 0);
   const dodepYuan = Number(u.total_dodep_yuan || 0);
   const totalUsd = Number(u.total_given_usd || 0);
-  const payoutUsd = totalUsd * 0.7;
+  const dodepUsdFromYuan = Number(process.env.USD_CNY_RATE || 7.2) > 0 ? dodepYuan / Number(process.env.USD_CNY_RATE || 7.2) : 0;
+  const payoutUsd = totalUsd * 0.7 + (dodepUsd + dodepUsdFromYuan) * 0.25;
   const usdCnyRate = Number(process.env.USD_CNY_RATE || 7.2);
   const currency = String(u.profile_currency || "USD").toUpperCase();
   let rate = 1;
@@ -1869,6 +1913,336 @@ async function renderOwnProfile(ctx: Ctx, me: any) {
   return ctx.reply(text, extra);
 }
 
+function formatAdminListDate(iso: string | null | undefined): string {
+  const d = new Date(String(iso || ""));
+  if (Number.isNaN(d.getTime())) return "-";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${dd}.${mm}.${yyyy} ${hh}:${mi}`;
+}
+
+async function renderAdminUsersPage(ctx: Ctx, pageRaw = 0) {
+  const pageSize = 10;
+  const total = Number((db.prepare("SELECT COUNT(*) c FROM users").get() as any)?.c || 0);
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  const page = Math.max(0, Math.min(pageRaw, maxPage));
+  const offset = page * pageSize;
+  const rows = db
+    .prepare("SELECT id, tg_username, discord_tag, registered_at FROM users ORDER BY id DESC LIMIT ? OFFSET ?")
+    .all(pageSize, offset) as any[];
+
+  const kbRows: any[] = rows.map((r) => {
+    const rawDiscord = String(r.discord_tag || "-").trim();
+    const discord = rawDiscord === "-" ? "-" : rawDiscord.startsWith("#") ? rawDiscord : `#${rawDiscord}`;
+    const dateLabel = formatAdminListDate(r.registered_at);
+    return [Markup.button.callback(`${discord} | ${dateLabel}`, `admin:usercard:${r.id}:${page}`)];
+  });
+  if (maxPage > 0) {
+    kbRows.push([
+      Markup.button.callback("⬅️", `admin:userlist:page:${Math.max(0, page - 1)}`),
+      Markup.button.callback(`${page + 1}/${maxPage + 1}`, "admin:userlist:noop"),
+      Markup.button.callback("➡️", `admin:userlist:page:${Math.min(maxPage, page + 1)}`),
+    ]);
+  }
+  kbRows.push([Markup.button.callback("🔎 Поиск", `admin:userlist:search:${page}`)]);
+
+  const text = `<b>Пользователи</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>`;
+  if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
+    await (ctx as any)
+      .editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(kbRows).reply_markup,
+      })
+      .catch(async () => {
+        await ctx.reply(text, { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(kbRows).reply_markup }).catch(() => null);
+      });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(kbRows).reply_markup });
+  }
+}
+
+async function runAdminBroadcastFromMessage(ctx: Ctx, sourceMessageId: number) {
+  const all = db.prepare("SELECT tg_id FROM users WHERE is_approved = 1 AND is_banned = 0").all() as any[];
+  for (const u of all) {
+    await bot.telegram
+      .copyMessage(Number(u.tg_id), ctx.chat.id, sourceMessageId)
+      .catch(() => null);
+  }
+}
+
+async function renderAdminLogs(ctx: Ctx, pageRaw = 0, queryRaw = "") {
+  const pageSize = 10;
+  const query = String(queryRaw || "").trim();
+  const where = query
+    ? `WHERE LOWER(IFNULL(l.actor_role,'')) LIKE LOWER(?) OR LOWER(IFNULL(l.event_type,'')) LIKE LOWER(?) OR LOWER(IFNULL(l.details,'')) LIKE LOWER(?) OR LOWER(IFNULL(u.tg_username,'')) LIKE LOWER(?) OR LOWER(IFNULL(u.discord_tag,'')) LIKE LOWER(?)`
+    : "";
+  const args = query ? [`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`] : [];
+  const total = Number((db.prepare(`SELECT COUNT(*) c FROM logs l LEFT JOIN users u ON u.id = l.actor_user_id ${where}`).get(...args) as any)?.c || 0);
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  const page = Math.max(0, Math.min(pageRaw, maxPage));
+  const offset = page * pageSize;
+  const rows = db
+    .prepare(
+      `SELECT l.*, u.tg_username, u.discord_tag, u.tg_id FROM logs l LEFT JOIN users u ON u.id = l.actor_user_id ${where} ORDER BY l.id DESC LIMIT ? OFFSET ?`,
+    )
+    .all(...args, pageSize, offset) as any[];
+
+  const eventLabel = (e: string) =>
+    ({
+      text: "Текст",
+      callback_query: "Кнопка",
+      command: "Команда",
+      join_request: "Заявка на вступление",
+      work_request: "Заявка на добив",
+      panel_request: "Проверка на панеле",
+      rent_request: "Аренда аккаунта",
+    } as Record<string, string>)[e] || e;
+  const lines = rows.map((x) => {
+    const at = String(x.created_at || "").replace("T", " ").replace("Z", "");
+    const tg = x.tg_username ? `@${x.tg_username}` : `id:${x.tg_id || x.actor_tg_id || "-"}`;
+    const discord = x.discord_tag || "-";
+    return (
+      `<blockquote>` +
+      `Время: <b>${escapeHtml(at)}</b>\n` +
+      `Роль: <b>${escapeHtml(String(x.actor_role || "USER"))}</b>\n` +
+      `Событие: <b>${escapeHtml(eventLabel(String(x.event_type || "-")))}</b>\n` +
+      `Пользователь: <b>${escapeHtml(tg)}</b>\n` +
+      `Discord: <b>${escapeHtml(discord)}</b>\n` +
+      `Детали: <b>${escapeHtml(String(x.details || "-"))}</b>` +
+      `</blockquote>`
+    );
+  });
+  const title = query
+    ? `<b>Логи</b>\nПоиск: <b>${escapeHtml(query)}</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>\n\n`
+    : `<b>Логи</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>\n\n`;
+  const body = rows.length ? lines.join("\n") : "<blockquote>Ничего не найдено</blockquote>";
+  const text = `${title}${body}`;
+
+  const kbRows: any[] = [];
+  if (maxPage > 0) {
+    kbRows.push([
+      Markup.button.callback("⬅️", `logs:page:${Math.max(0, page - 1)}`),
+      Markup.button.callback(`${page + 1}/${maxPage + 1}`, "logs:noop"),
+      Markup.button.callback("➡️", `logs:page:${Math.min(maxPage, page + 1)}`),
+    ]);
+  }
+  kbRows.push([Markup.button.callback("🔎 Поиск", "logs:search")]);
+  kbRows.push([Markup.button.callback("🧹 Сбросить поиск", "logs:clear")]);
+  const extra = { parse_mode: "HTML" as const, link_preview_options: { is_disabled: true }, reply_markup: Markup.inlineKeyboard(kbRows).reply_markup };
+  if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
+    await (ctx as any).editMessageText(text, extra).catch(() => null);
+  } else {
+    await ctx.reply(text, extra);
+  }
+}
+
+async function renderAdminRequestList(ctx: Ctx, kind: "work" | "panel" | "rent", pageRaw = 0, queryRaw = "") {
+  const pageSize = 10;
+  const query = String(queryRaw || "").trim().toLowerCase();
+  const rows =
+    kind === "work"
+      ? (db
+          .prepare(
+            "SELECT wr.id, wr.number, wr.steam_id, wr.status, wr.created_at, u.tg_username, u.discord_tag FROM work_requests wr LEFT JOIN users u ON u.id = wr.owner_id WHERE wr.status = 'PENDING' ORDER BY wr.id DESC",
+          )
+          .all() as any[])
+      : (db
+          .prepare(
+            kind === "panel"
+              ? "SELECT pr.id, pr.number, pr.steam_id, pr.status, pr.created_at, u.tg_username, u.discord_tag FROM panel_requests pr LEFT JOIN users u ON u.id = pr.user_id WHERE pr.status = 'PENDING' ORDER BY pr.id DESC"
+              : "SELECT DISTINCT rrm.rental_id AS id, rt.number, rt.title AS steam_id, 'PENDING' AS status, '' AS created_at, u.tg_username, u.discord_tag, rrm.user_id FROM rent_request_messages rrm LEFT JOIN rentals rt ON rt.id = rrm.rental_id LEFT JOIN users u ON u.id = rrm.user_id WHERE IFNULL(rt.is_busy,0)=0 ORDER BY rrm.id DESC",
+          )
+          .all() as any[]);
+  const filtered = query
+    ? rows.filter((r) => {
+        const blob = `${r.number || ""} ${r.steam_id || ""} ${r.status || ""} ${r.tg_username || ""} ${r.discord_tag || ""}`.toLowerCase();
+        return blob.includes(query);
+      })
+    : rows;
+  const total = filtered.length;
+  const maxPage = Math.max(0, Math.ceil(total / pageSize) - 1);
+  const page = Math.max(0, Math.min(pageRaw, maxPage));
+  const slice = filtered.slice(page * pageSize, page * pageSize + pageSize);
+
+  const kbRows: any[] = slice.map((r) => {
+    const user = `@${r.tg_username || "-"}`;
+    const discord = r.discord_tag || "-";
+    const prefix = kind === "work" ? "⌛️ Добив" : kind === "panel" ? "⌛️ Проверка" : "⌛️ Аренда";
+    const label = `${prefix} | ${user} | ${discord}`;
+    const cb =
+      kind === "work" ? `work:list:open:${r.id}:${page}` : kind === "panel" ? `panel:list:open:${r.id}:${page}` : `rent:list:open:${r.id}:${page}:${r.user_id || 0}`;
+    return [Markup.button.callback(label, cb)];
+  });
+  if (maxPage > 0) {
+    kbRows.push([
+      Markup.button.callback("⬅️", `${kind}:list:page:${Math.max(0, page - 1)}`),
+      Markup.button.callback(`${page + 1}/${maxPage + 1}`, `${kind}:list:noop`),
+      Markup.button.callback("➡️", `${kind}:list:page:${Math.min(maxPage, page + 1)}`),
+    ]);
+  }
+  kbRows.push([Markup.button.callback("🔎 Поиск", `${kind}:list:search`)]);
+  if (query) kbRows.push([Markup.button.callback("🧹 Сбросить поиск", `${kind}:list:clear`)]);
+
+  const title = kind === "work" ? "Заявки на добив" : kind === "panel" ? "Заявки на проверку" : "Заявки на аренду";
+  const text = query
+    ? `<b>${title}</b>\nПоиск: <b>${escapeHtml(query)}</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>`
+    : `<b>${title}</b>\nСтраница: <b>${page + 1}/${Math.max(1, maxPage + 1)}</b>`;
+  const extra = { parse_mode: "HTML" as const, reply_markup: Markup.inlineKeyboard(kbRows).reply_markup };
+  if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
+    await (ctx as any).editMessageText(text, extra).catch(() => null);
+  } else {
+    await ctx.reply(text, extra);
+  }
+}
+
+type StatsRangeKey = "today" | "week" | "month" | "year" | "all";
+
+function getStatsRangeStartIso(range: StatsRangeKey): string | null {
+  if (range === "all") return null;
+  const now = new Date();
+  const d = new Date(now);
+  if (range === "today") {
+    d.setHours(0, 0, 0, 0);
+  } else if (range === "week") {
+    d.setDate(d.getDate() - 7);
+  } else if (range === "month") {
+    d.setMonth(d.getMonth() - 1);
+  } else if (range === "year") {
+    d.setFullYear(d.getFullYear() - 1);
+  }
+  return d.toISOString();
+}
+
+function statsRangeLabel(range: StatsRangeKey): string {
+  return (
+    {
+      today: "За сегодня",
+      week: "За неделю",
+      month: "За месяц",
+      year: "За год",
+      all: "За все время",
+    }[range] || "За все время"
+  );
+}
+
+async function renderAdminStats(ctx: Ctx, range: StatsRangeKey) {
+  const fromIso = getStatsRangeStartIso(range);
+  const totalUsers = Number((db.prepare("SELECT COUNT(*) c FROM users").get() as any)?.c || 0);
+  const usdCnyRate = Number(process.env.USD_CNY_RATE || 7.2);
+
+  const wrWhere = fromIso ? "WHERE created_at >= ?" : "";
+  const wrArg = fromIso ? [fromIso] : [];
+  const wrRows = db
+    .prepare(`SELECT owner_id, worker_id, status, amount_usd, dodep_usd, dodep_yuan FROM work_requests ${wrWhere}`)
+    .all(...wrArg) as Array<{ owner_id: number; worker_id: number | null; status: string; amount_usd: number; dodep_usd: number; dodep_yuan: number }>;
+
+  const sessionsGiven = wrRows.length;
+  const sessionsDone = wrRows.filter((r) => r.status === "COMPLETED").length;
+  const sessionsFailed = wrRows.filter((r) => r.status === "FAILED").length;
+  const dodepCount = wrRows.filter((r) => Number(r.dodep_usd || 0) > 0 || Number(r.dodep_yuan || 0) > 0).length;
+  const sumGivenUsd = wrRows.reduce((acc, r) => acc + Number(r.amount_usd || 0), 0);
+  const sumDoneUsd = wrRows.filter((r) => r.status === "COMPLETED").reduce((acc, r) => acc + Number(r.amount_usd || 0), 0);
+  const sumFailedUsd = wrRows.filter((r) => r.status === "FAILED").reduce((acc, r) => acc + Number(r.amount_usd || 0), 0);
+  const sumDodepUsd = wrRows.reduce((acc, r) => {
+    const usd = Number(r.dodep_usd || 0);
+    const yuan = Number(r.dodep_yuan || 0);
+    const fromYuan = usdCnyRate > 0 ? yuan / usdCnyRate : 0;
+    return acc + usd + fromYuan;
+  }, 0);
+
+  const activeUsers = new Set<number>();
+  for (const r of wrRows) {
+    if (Number(r.owner_id) > 0) activeUsers.add(Number(r.owner_id));
+  }
+  const activeRatio = totalUsers > 0 ? (activeUsers.size / totalUsers) * 100 : 0;
+  const activityLabel = activeRatio < 10 ? "ужасная" : activeRatio < 25 ? "плохая" : activeRatio < 50 ? "хорошая" : "отличная";
+
+  const workerIds = Array.from(new Set(wrRows.map((r) => Number(r.worker_id || 0)).filter((x) => x > 0)));
+  const workerRoleMap = new Map<number, Set<string>>();
+  for (const wid of workerIds) {
+    const rs = db.prepare("SELECT role FROM user_roles WHERE user_id = ?").all(wid) as Array<{ role: string }>;
+    workerRoleMap.set(wid, new Set(rs.map((x) => String(x.role))));
+  }
+
+  const eligibleOwnerIds = new Set<number>(
+    (
+      db
+        .prepare(
+          "SELECT DISTINCT user_id FROM user_roles WHERE role IN ('USER','CHATER','LANDLORD')",
+        )
+        .all() as Array<{ user_id: number }>
+    ).map((x) => Number(x.user_id)),
+  );
+
+  const byOwner = new Map<number, { given: number; doneByStaff: number; failed: number }>();
+  for (const r of wrRows) {
+    const ownerId = Number(r.owner_id || 0);
+    if (!ownerId || !eligibleOwnerIds.has(ownerId)) continue;
+    if (!byOwner.has(ownerId)) byOwner.set(ownerId, { given: 0, doneByStaff: 0, failed: 0 });
+    const item = byOwner.get(ownerId)!;
+    item.given += 1;
+    if (r.status === "COMPLETED") {
+      const wid = Number(r.worker_id || 0);
+      const roles = workerRoleMap.get(wid) || new Set<string>();
+      if (roles.has("ADMIN") || roles.has("DOBIVER")) item.doneByStaff += 1;
+    }
+    if (r.status === "FAILED") item.failed += 1;
+  }
+
+  let bestOwnerId = 0;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestStats = { given: 0, doneByStaff: 0, failed: 0 };
+  for (const [ownerId, s] of byOwner.entries()) {
+    const score = s.given + s.doneByStaff * 2 - s.failed;
+    const better =
+      score > bestScore ||
+      (score === bestScore &&
+        (s.doneByStaff > bestStats.doneByStaff ||
+          (s.doneByStaff === bestStats.doneByStaff && s.failed < bestStats.failed)));
+    if (better) {
+      bestOwnerId = ownerId;
+      bestScore = score;
+      bestStats = s;
+    }
+  }
+  const bestUser = bestOwnerId ? (db.prepare("SELECT tg_username, discord_tag FROM users WHERE id = ?").get(bestOwnerId) as any) : null;
+  const bestName = bestUser ? `@${bestUser.tg_username || bestUser.discord_tag || bestOwnerId}` : "-";
+  const money = (v: number) => `$${v.toFixed(2)}`;
+
+  const text =
+    `<b>Статистика</b>\n` +
+    `Период: <b>${statsRangeLabel(range)}</b>\n\n` +
+    `Пользователей в боте: <b>${totalUsers}</b>\n` +
+    `Общая активность пользователей: <b>${activityLabel}</b>\n` +
+    `Отдано на добив: <b>${sessionsGiven}</b> | Сумма: <b>${money(sumGivenUsd)}</b>\n` +
+    `Снятий: <b>${sessionsDone}</b> | Сумма снятий: <b>${money(sumDoneUsd)}</b>\n` +
+    `Слетов: <b>${sessionsFailed}</b> | Сумма слетов: <b>${money(sumFailedUsd)}</b>\n` +
+    `Додепов: <b>${dodepCount}</b> | Сумма додепов: <b>${money(sumDodepUsd)}</b>\n\n` +
+    `Лучший работник: <b>${escapeHtml(bestName)}</b>\n` +
+    `Отдал: <b>${bestStats.given}</b> | Снятые: <b>${bestStats.doneByStaff}</b> | Слетевшие: <b>${bestStats.failed}</b>`;
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback(range === "today" ? "✓ Сегодня" : "Сегодня", "stats:range:today"),
+      Markup.button.callback(range === "week" ? "✓ Неделя" : "Неделя", "stats:range:week"),
+      Markup.button.callback(range === "month" ? "✓ Месяц" : "Месяц", "stats:range:month"),
+    ],
+    [
+      Markup.button.callback(range === "year" ? "✓ Год" : "Год", "stats:range:year"),
+      Markup.button.callback(range === "all" ? "✓ Все время" : "Все время", "stats:range:all"),
+    ],
+  ]).reply_markup;
+
+  if (ctx.updateType === "callback_query" && typeof (ctx as any).editMessageText === "function") {
+    await (ctx as any).editMessageText(text, { parse_mode: "HTML", reply_markup: kb }).catch(() => null);
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+}
+
 async function renderDrawMenu(ctx: Ctx) {
   await replaceOrReply(
     ctx,
@@ -1891,7 +2265,7 @@ async function renderDrawMenu(ctx: Ctx) {
 async function notifyWorkers(text: string, kb: any) {
   const users = db
     .prepare(
-      "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER')",
+      "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER') AND IFNULL(np.notif_work,1)=1",
     )
     .all() as any[];
   for (const u of users) await bot.telegram.sendMessage(u.tg_id, text, kb).catch(() => null);
@@ -1956,7 +2330,7 @@ async function createWorkRequest(ctx: Ctx, raw: string) {
     `╰ SteamID: <code>${parsed.steamId}</code>`;
   const adminRows = db
     .prepare(
-      "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER') AND IFNULL(u.is_banned,0)=0",
+      "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER') AND IFNULL(u.is_banned,0)=0 AND IFNULL(np.notif_work,1)=1",
     )
     .all() as any[];
   db.prepare("DELETE FROM work_request_messages WHERE work_request_id = ?").run(ins.lastInsertRowid);
@@ -2003,6 +2377,26 @@ registerBasicHandlers(bot, {
   nowIso,
   joinRequestText,
   getRentalGuardCode,
+});
+
+bot.on("message", async (ctx: any, next) => {
+  const me = ensureUser(ctx);
+  if (!me) return next();
+  const st = state.get(ctx.from.id);
+  if (st?.mode !== "admin_broadcast") return next();
+  const isText = typeof (ctx.message as any)?.text === "string";
+  if (isText) return next();
+  const mid = Number((ctx.message as any)?.message_id || 0);
+  if (!mid) return next();
+  await runAdminBroadcastFromMessage(ctx, mid);
+  await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => null);
+  const promptMid = Number(st.payload?.promptMessageId || 0);
+  if (promptMid > 0) {
+    await ctx.telegram.deleteMessage(ctx.chat.id, promptMid).catch(() => null);
+  }
+  state.delete(ctx.from.id);
+  await ctx.reply("ㅤ", adminKb);
+  return;
 });
 
 bot.on("text", async (ctx) => {
@@ -2219,7 +2613,7 @@ bot.on("text", async (ctx) => {
     ]);
     const admins = db
       .prepare(
-        "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER')",
+        "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role IN ('ADMIN','DOBIVER') AND IFNULL(np.notif_panel,1)=1",
       )
       .all() as any[];
     for (const a of admins) {
@@ -2265,7 +2659,7 @@ bot.on("text", async (ctx) => {
         await ctx.telegram
           .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
           .catch(() => null);
-      }, 620);
+      }, 800);
       if (mode === "friend_page") {
         try {
           screenshotPath = await makeSteamFriendPageFromTemplateScreenshot(normalized.profileUrl);
@@ -2289,6 +2683,10 @@ bot.on("text", async (ctx) => {
         clearInterval(drawTicker);
         drawTicker = null;
       }
+      frameIndex = frames.length - 1;
+      await ctx.telegram
+        .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
+        .catch(() => null);
       const sendDocPromise = ctx.replyWithDocument(Input.fromLocalFile(screenshotPath, fileName));
       const deleteDrawPromise = drawMsgId > 0 ? ctx.deleteMessage(drawMsgId).catch(() => null) : Promise.resolve(null);
       await Promise.all([sendDocPromise, deleteDrawPromise]);
@@ -2646,57 +3044,181 @@ bot.on("text", async (ctx) => {
   }
 
   if (isProfileBtn) return void (await renderOwnProfile(ctx, me));
-  if (text === "Список пользователей" && hasRole(me, ["ADMIN"])) {
-    const rows = db.prepare("SELECT tg_username, discord_tag, registered_at FROM users ORDER BY id DESC LIMIT 100").all() as any[];
-    await ctx.reply(rows.map((r, i) => `${i + 1}. @${r.tg_username || "-"} | ${r.discord_tag || "-"} | ${r.registered_at}`).join("\n") || "Пусто");
+  if ((text === "Список пользователей" || text === "Пользователи") && hasRole(me, ["ADMIN"])) {
+    await renderAdminUsersPage(ctx, 0);
     return;
   }
   if (text === "Управление пользователями" && hasRole(me, ["ADMIN"])) {
-    state.set(ctx.from.id, { mode: "admin_find_user" });
-    await ctx.reply("Отправьте Discord/@username/ID");
+    state.set(ctx.from.id, { mode: "admin_find_user", payload: { returnPage: 0 } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите Discord/Username/ID чтобы найти пользователя.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("⬅️ К списку", "admin:userlist:page:0")]]).reply_markup,
+      },
+    );
     return;
   }
   if (st?.mode === "admin_find_user") {
+    if (ctx.message?.message_id) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => null);
+    }
+    const returnPage = Math.max(0, Number(st.payload?.returnPage || 0));
+    const promptMid = uiPromptMsg.get(ctx.from.id);
+    const replaceSearchPrompt = async (textOut: string, extra?: any) => {
+      if (promptMid) {
+        const edited = await ctx.telegram
+          .editMessageText(ctx.chat.id, promptMid, undefined, textOut, extra)
+          .then(() => true)
+          .catch(() => false);
+        if (edited) return;
+      }
+      const sent = await ctx.reply(textOut, extra).catch(() => null as any);
+      if (sent?.message_id) uiPromptMsg.set(ctx.from.id, sent.message_id);
+    };
     const t = db
       .prepare("SELECT * FROM users WHERE id = ? OR LOWER(IFNULL(discord_tag,'')) = LOWER(?) OR LOWER(IFNULL(tg_username,'')) = LOWER(?) LIMIT 1")
       .get(Number(text) || -1, text, text.replace("@", "")) as any;
-    if (!t) return void (await ctx.reply("Не найден"));
-    await ctx.reply(
+    if (!t) {
+      await replaceSearchPrompt(
+        "Не найден",
+        {
+          reply_markup: Markup.inlineKeyboard([[Markup.button.callback("⬅️ К списку", `admin:userlist:page:${returnPage}`)]]).reply_markup,
+        },
+      );
+      return;
+    }
+    await replaceSearchPrompt(
       `Найден #${t.id} @${t.tg_username || "-"}`,
-      Markup.inlineKeyboard([[Markup.button.callback("Забанить/Разбанить", `admin:ban:${t.id}`), Markup.button.callback("Написать сообщение", `admin:msg:${t.id}`), Markup.button.callback("Выдать права", `admin:roles:${t.id}`)]]),
+      {
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("Забанить/Разбанить", `admin:ban:${t.id}`), Markup.button.callback("Написать сообщение", `admin:msg:${t.id}:${returnPage}`)],
+          [Markup.button.callback("Выдать права", `admin:roles:${t.id}:${returnPage}`)],
+          [Markup.button.callback("⬅️ К списку", `admin:userlist:page:${returnPage}`)],
+        ]).reply_markup,
+      },
     );
     state.delete(ctx.from.id);
     return;
   }
-  if (text === "Рассылка" && hasRole(me, ["ADMIN"])) {
-    state.set(ctx.from.id, { mode: "admin_broadcast" });
-    await ctx.reply("Введите текст рассылки");
-    return;
-  }
-  if (st?.mode === "admin_broadcast") {
-    const all = db.prepare("SELECT tg_id FROM users WHERE is_approved = 1 AND is_banned = 0").all() as any[];
-    let ok = 0;
-    for (const u of all) if (await bot.telegram.sendMessage(u.tg_id, text).then(() => true).catch(() => false)) ok++;
-    await ctx.reply(`Рассылка завершена: ${ok}/${all.length}`);
+  if (st?.mode === "admin_send_msg") {
+    const userId = Number(st.payload?.userId || 0);
+    const returnPage = Math.max(0, Number(st.payload?.returnPage || 0));
+    const promptMessageId = Number(st.payload?.promptMessageId || 0);
+    if (ctx.message?.message_id) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => null);
+    }
+    const target = db.prepare("SELECT * FROM users WHERE id = ? LIMIT 1").get(userId) as any;
+    if (!target) {
+      state.delete(ctx.from.id);
+      await ctx.reply("Пользователь не найден");
+      return;
+    }
+    const msgText = String(text || "").trim();
+    if (!msgText) {
+      await ctx.reply("Сообщение пустое");
+      return;
+    }
+    const sent = await bot.telegram.sendMessage(Number(target.tg_id), msgText).then(() => true).catch(() => false);
+    const profileText = `Найден #${target.id} @${target.tg_username || "-"}`;
+    const profileKb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("Забанить/Разбанить", `admin:ban:${target.id}`),
+        Markup.button.callback("Написать сообщение", `admin:msg:${target.id}:${returnPage}`),
+      ],
+      [Markup.button.callback("Выдать права", `admin:roles:${target.id}:${returnPage}`)],
+      [Markup.button.callback("⬅️ К списку", `admin:userlist:page:${returnPage}`)],
+    ]).reply_markup;
+    if (promptMessageId > 0) {
+      await ctx.telegram
+        .editMessageText(ctx.chat.id, promptMessageId, undefined, profileText, { reply_markup: profileKb })
+        .catch(() => null);
+    } else {
+      await ctx.reply(profileText, { reply_markup: profileKb }).catch(() => null);
+    }
+    if (!sent) {
+      await ctx.reply("Не удалось отправить сообщение пользователю. Возможно, он не запускал бота или заблокировал его.");
+    }
     state.delete(ctx.from.id);
     return;
   }
+  if (text === "Рассылка" && hasRole(me, ["ADMIN"])) {
+    const prompt = await ctx.reply(`<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Отправьте сообщение для рассылки.</b>`, {
+      parse_mode: "HTML",
+      reply_markup: Markup.inlineKeyboard([[Markup.button.callback("❌ Отменить", "admin:broadcast:back")]]).reply_markup,
+    });
+    state.set(ctx.from.id, { mode: "admin_broadcast", payload: { promptMessageId: prompt?.message_id || null } });
+    return;
+  }
+  if (st?.mode === "admin_broadcast") {
+    const mid = Number((ctx.message as any)?.message_id || 0);
+    await runAdminBroadcastFromMessage(ctx, mid);
+    if (mid > 0) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => null);
+    }
+    const promptMid = Number(st.payload?.promptMessageId || 0);
+    if (promptMid > 0) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, promptMid).catch(() => null);
+    }
+    state.delete(ctx.from.id);
+    await ctx.reply("ㅤ", adminKb);
+    return;
+  }
+  if (st?.mode === "admin_logs_search" && hasRole(me, ["ADMIN"])) {
+    const q = String(text || "").trim();
+    if (ctx.message?.message_id) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => null);
+    }
+    adminLogsViewState.set(ctx.from.id, { query: q });
+    state.delete(ctx.from.id);
+    await renderAdminLogs(ctx, 0, q);
+    return;
+  }
+  if (st?.mode === "admin_req_search" && hasRole(me, ["ADMIN"])) {
+    const kind = (st.payload?.kind === "panel" ? "panel" : st.payload?.kind === "rent" ? "rent" : "work") as "work" | "panel" | "rent";
+    const q = String(text || "").trim();
+    if (ctx.message?.message_id) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => null);
+    }
+    adminReqListState.set(ctx.from.id, { kind, query: q });
+    state.delete(ctx.from.id);
+    await renderAdminRequestList(ctx, kind, 0, q);
+    return;
+  }
+  if (text === "Уведомления" && hasRole(me, ["ADMIN", "DOBIVER"])) {
+    ensureNotificationPrefs(me.id);
+    const p = db.prepare("SELECT * FROM notification_prefs WHERE user_id = ?").get(me.id) as any;
+    await ctx.reply(renderNotifyText(p), { parse_mode: "HTML", reply_markup: renderNotifyKb(p).reply_markup });
+    return;
+  }
   if (text === "Логи" && hasRole(me, ["ADMIN"])) {
-    const rows = db.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 100").all() as any[];
-    await ctx.reply(rows.map((x) => `[${x.created_at}] ${x.actor_role} ${x.event_type} ${x.details || ""}`).join("\n") || "Р›РѕРіРѕРІ РЅРµС‚");
+    adminLogsViewState.set(ctx.from.id, { query: "" });
+    await renderAdminLogs(ctx, 0, "");
     return;
   }
   if (text === "Статистика" && hasRole(me, ["ADMIN"])) {
-    const u = db.prepare("SELECT COUNT(*) c FROM users").get() as any;
-    const a = db.prepare("SELECT COUNT(*) c FROM work_requests").get() as any;
-    const done = db.prepare("SELECT COUNT(*) c FROM work_requests WHERE status = 'COMPLETED'").get() as any;
-    const fail = db.prepare("SELECT COUNT(*) c FROM work_requests WHERE status = 'FAILED'").get() as any;
-    await ctx.reply(`Пользователей: ${u.c}\nЗаявок: ${a.c}\nСнято: ${done.c}\nСлетов: ${fail.c}`);
+    await renderAdminStats(ctx, "all");
     return;
   }
   if (text === "Заявки на работу" && hasRole(me, ["ADMIN"])) {
-    const rows = db.prepare("SELECT number, status, amount_usd, region FROM work_requests ORDER BY id DESC LIMIT 50").all() as any[];
-    await ctx.reply(rows.map((x) => `№${x.number} ${x.status} $${x.amount_usd} ${x.region}`).join("\n") || "Пусто");
+    adminReqListState.set(ctx.from.id, { kind: "work", query: "" });
+    await renderAdminRequestList(ctx, "work", 0, "");
+    return;
+  }
+  if (text === "Заявки на добив" && hasRole(me, ["ADMIN"])) {
+    adminReqListState.set(ctx.from.id, { kind: "work", query: "" });
+    await renderAdminRequestList(ctx, "work", 0, "");
+    return;
+  }
+  if (text === "Заявки на проверку" && hasRole(me, ["ADMIN"])) {
+    adminReqListState.set(ctx.from.id, { kind: "panel", query: "" });
+    await renderAdminRequestList(ctx, "panel", 0, "");
+    return;
+  }
+  if (text === "Заявки на аренду" && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    adminReqListState.set(ctx.from.id, { kind: "rent", query: "" });
+    await renderAdminRequestList(ctx, "rent", 0, "");
     return;
   }
   if (isRentBtn) {
@@ -2863,8 +3385,281 @@ bot.on("callback_query", async (ctx, next) => {
   const data = ctx.callbackQuery.data;
   const me = ensureUser(ctx);
   if (!me) return;
-  if (!me.is_approved && data !== "register:discord:unavailable") {
+  const allowAdminJoinReviewWhileUnapproved =
+    hasRole(me, ["ADMIN"]) && (data.startsWith("join:") || data.startsWith("joinreq:"));
+  if (!me.is_approved && data !== "register:discord:unavailable" && !allowAdminJoinReviewWhileUnapproved) {
     await ctx.answerCbQuery("Сначала привяжите Discord через /start", { show_alert: true }).catch(() => null);
+    return;
+  }
+
+  if (data === "admin:userlist:noop") {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("notify:toggle:") && hasRole(me, ["ADMIN", "DOBIVER"])) {
+    ensureNotificationPrefs(me.id);
+    const key = String(data.split(":").pop() || "");
+    const col =
+      key === "work" ? "notif_work" :
+      key === "join" ? "notif_join" :
+      key === "panel" ? "notif_panel" :
+      key === "rent" ? "notif_rent" : "";
+    if (!col) {
+      await ctx.answerCbQuery("Неизвестный тип", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const cur = db.prepare(`SELECT ${col} AS v FROM notification_prefs WHERE user_id = ?`).get(me.id) as any;
+    const nextVal = Number(cur?.v || 0) ? 0 : 1;
+    db.prepare(`UPDATE notification_prefs SET ${col} = ? WHERE user_id = ?`).run(nextVal, me.id);
+    const p = db.prepare("SELECT * FROM notification_prefs WHERE user_id = ?").get(me.id) as any;
+    await ctx.editMessageText(renderNotifyText(p), { parse_mode: "HTML", reply_markup: renderNotifyKb(p).reply_markup }).catch(() => null);
+    await ctx.answerCbQuery(nextVal ? "Включено" : "Выключено").catch(() => null);
+    return;
+  }
+
+  if (data === "admin:broadcast:back" && hasRole(me, ["ADMIN"])) {
+    state.delete(ctx.from.id);
+    await ctx.deleteMessage().catch(() => null);
+    await ctx.reply("ㅤ", adminKb);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data === "logs:noop" && hasRole(me, ["ADMIN"])) {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if ((data === "work:list:noop" || data === "panel:list:noop") && hasRole(me, ["ADMIN"])) {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data === "rent:list:noop" && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if ((data === "work:list:search" || data === "panel:list:search") && hasRole(me, ["ADMIN"])) {
+    const kind = data.startsWith("panel:") ? "panel" : "work";
+    state.set(ctx.from.id, { mode: "admin_req_search", payload: { kind } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите ключевое слово для поиска заявки.</b>`,
+      { parse_mode: "HTML" },
+    );
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data === "rent:list:search" && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    state.set(ctx.from.id, { mode: "admin_req_search", payload: { kind: "rent" } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите ключевое слово для поиска заявки.</b>`,
+      { parse_mode: "HTML" },
+    );
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if ((data === "work:list:clear" || data === "panel:list:clear") && hasRole(me, ["ADMIN"])) {
+    const kind = data.startsWith("panel:") ? "panel" : "work";
+    adminReqListState.set(ctx.from.id, { kind: kind as any, query: "" });
+    await renderAdminRequestList(ctx, kind as any, 0, "");
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data === "rent:list:clear" && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    adminReqListState.set(ctx.from.id, { kind: "rent", query: "" });
+    await renderAdminRequestList(ctx, "rent", 0, "");
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("work:list:page:") && hasRole(me, ["ADMIN"])) {
+    const page = Number(data.split(":").pop() || 0);
+    const q = adminReqListState.get(ctx.from.id)?.query || "";
+    await renderAdminRequestList(ctx, "work", Number.isFinite(page) ? page : 0, q);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("panel:list:page:") && hasRole(me, ["ADMIN"])) {
+    const page = Number(data.split(":").pop() || 0);
+    const q = adminReqListState.get(ctx.from.id)?.query || "";
+    await renderAdminRequestList(ctx, "panel", Number.isFinite(page) ? page : 0, q);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data.startsWith("rent:list:page:") && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    const page = Number(data.split(":").pop() || 0);
+    const q = adminReqListState.get(ctx.from.id)?.query || "";
+    await renderAdminRequestList(ctx, "rent", Number.isFinite(page) ? page : 0, q);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("work:list:open:") && hasRole(me, ["ADMIN"])) {
+    const parts = data.split(":");
+    const id = Number(parts[3] || 0);
+    const page = Number(parts[4] || 0);
+    const req = db.prepare("SELECT wr.*, u.tg_username, u.discord_tag FROM work_requests wr LEFT JOIN users u ON u.id = wr.owner_id WHERE wr.id = ?").get(id) as any;
+    if (!req) {
+      await ctx.answerCbQuery("Заявка не найдена", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const userLabel = req.tg_username ? `@${req.tg_username}` : String(req.owner_tg_id || "-");
+    const text =
+      `<tg-emoji emoji-id="5239948611806081116">❗️</tg-emoji> <b>Новая заявка №${req.number} на добив</b>\n` +
+      `├ Пользователь: <b>${escapeHtml(userLabel)}</b>\n` +
+      `├ Discord: <b>${escapeHtml(req.discord_tag || "-")}</b>\n` +
+      `╰ SteamID: <code>${escapeHtml(req.steam_id || "-")}</code>`;
+    await ctx
+      .editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("✅ Взять", `work:take:${id}`), Markup.button.callback("❌ Отказаться", `work:reject:${id}`)],
+          [Markup.button.callback("⬅️ Назад", `work:list:page:${Math.max(0, page)}`)],
+        ]).reply_markup,
+      })
+      .catch(() => null);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("panel:list:open:") && hasRole(me, ["ADMIN"])) {
+    const parts = data.split(":");
+    const id = Number(parts[3] || 0);
+    const page = Number(parts[4] || 0);
+    const req = db.prepare("SELECT pr.*, u.tg_username, u.discord_tag FROM panel_requests pr LEFT JOIN users u ON u.id = pr.user_id WHERE pr.id = ?").get(id) as any;
+    if (!req) {
+      await ctx.answerCbQuery("Заявка не найдена", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const userLabel = req.tg_username ? `@${req.tg_username}` : String(req.user_tg_id || "-");
+    const text =
+      `<tg-emoji emoji-id="5239948611806081116">❗️</tg-emoji> <b>Новая заявка №${req.number} на проверку</b>\n` +
+      `├ Пользователь: <b>${escapeHtml(userLabel)}</b>\n` +
+      `├ Discord: <b>${escapeHtml(req.discord_tag || "-")}</b>\n` +
+      `╰ SteamID: <code>${escapeHtml(req.steam_id || "-")}</code>`;
+    await ctx
+      .editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("✅ Есть", `panelreq:yes:${id}`), Markup.button.callback("❌ Нету", `panelreq:no:${id}`)],
+          [Markup.button.callback("⬅️ Назад", `panel:list:page:${Math.max(0, page)}`)],
+        ]).reply_markup,
+      })
+      .catch(() => null);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+  if (data.startsWith("rent:list:open:") && hasRole(me, ["ADMIN", "LANDLORD"])) {
+    const parts = data.split(":");
+    const rentalId = Number(parts[3] || 0);
+    const page = Number(parts[4] || 0);
+    const userId = Number(parts[5] || 0);
+    const rent = db.prepare("SELECT * FROM rentals WHERE id = ?").get(rentalId) as any;
+    const u = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
+    if (!rent || !u) {
+      await ctx.answerCbQuery("Заявка не найдена", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const text =
+      `<tg-emoji emoji-id="5239948611806081116">❗️</tg-emoji> <b>Новая заявка №${rent.number} на аренду</b>\n` +
+      `├ Пользователь: <b>@${escapeHtml(u.tg_username || "-")}</b>\n` +
+      `├ Discord: <b>${escapeHtml(u.discord_tag || "-")}</b>\n` +
+      `╰ Аккаунт: <b>${escapeHtml(cleanUiText(rent.title, `Аккаунт #${rent.number}`))}</b>`;
+    await ctx
+      .editMessageText(text, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("✅ Принять", `rent:approve:${rentalId}:${userId}`), Markup.button.callback("❌ Отклонить", `rent:reject:${rentalId}:${userId}`)],
+          [Markup.button.callback("💬 Начать диалог", `rent:dialog:start:${rentalId}:${userId}`)],
+          [Markup.button.callback("⬅️ Назад", `rent:list:page:${Math.max(0, page)}`)],
+        ]).reply_markup,
+      })
+      .catch(() => null);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data === "logs:search" && hasRole(me, ["ADMIN"])) {
+    state.set(ctx.from.id, { mode: "admin_logs_search" });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите ключевое слово для поиска логов.</b>`,
+      { parse_mode: "HTML" },
+    );
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data === "logs:clear" && hasRole(me, ["ADMIN"])) {
+    adminLogsViewState.set(ctx.from.id, { query: "" });
+    await renderAdminLogs(ctx, 0, "");
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("logs:page:") && hasRole(me, ["ADMIN"])) {
+    const page = Number(data.split(":").pop() || 0);
+    const q = adminLogsViewState.get(ctx.from.id)?.query || "";
+    await renderAdminLogs(ctx, Number.isFinite(page) ? page : 0, q);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("stats:range:") && hasRole(me, ["ADMIN"])) {
+    const range = String(data.split(":").pop() || "all") as StatsRangeKey;
+    const allowed = new Set<StatsRangeKey>(["today", "week", "month", "year", "all"]);
+    await renderAdminStats(ctx, allowed.has(range) ? range : "all");
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("admin:userlist:search:") && hasRole(me, ["ADMIN"])) {
+    const page = Math.max(0, Number(data.split(":").pop() || 0));
+    state.set(ctx.from.id, { mode: "admin_find_user", payload: { returnPage: page } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите Discord/Username/ID чтобы найти пользователя.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("⬅️ К списку", `admin:userlist:page:${page}`)]]).reply_markup,
+      },
+    );
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("admin:userlist:page:") && hasRole(me, ["ADMIN"])) {
+    const page = Number(data.split(":").pop() || 0);
+    await renderAdminUsersPage(ctx, Number.isFinite(page) ? page : 0);
+    await ctx.answerCbQuery().catch(() => null);
+    return;
+  }
+
+  if (data.startsWith("admin:usercard:") && hasRole(me, ["ADMIN"])) {
+    const parts = data.split(":");
+    const userId = Number(parts[2] || 0);
+    const page = Number(parts[3] || 0);
+    const t = db.prepare("SELECT * FROM users WHERE id = ? LIMIT 1").get(userId) as any;
+    if (!t) {
+      await ctx.answerCbQuery("Пользователь не найден", { show_alert: true }).catch(() => null);
+      return;
+    }
+    const profileText = `Найден #${t.id} @${t.tg_username || "-"}`;
+    const profileKb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("Забанить/Разбанить", `admin:ban:${t.id}`),
+        Markup.button.callback("Написать сообщение", `admin:msg:${t.id}:${Math.max(0, page)}`),
+      ],
+      [Markup.button.callback("Выдать права", `admin:roles:${t.id}:${Math.max(0, page)}`)],
+      [Markup.button.callback("⬅️ К списку", `admin:userlist:page:${Math.max(0, page)}`)],
+    ]);
+    await ctx.editMessageText(profileText, { reply_markup: profileKb.reply_markup }).catch(() => null);
+    await ctx.answerCbQuery().catch(() => null);
     return;
   }
 
@@ -2925,6 +3720,17 @@ bot.on("callback_query", async (ctx, next) => {
       {
         parse_mode: "HTML",
         reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:acc_blocked")]]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (["draw:friend_page", "draw:qr_page", "draw:ban_cs2", "draw:code_cs2", "draw:ban_dota2"].includes(data)) {
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5239948611806081116">⚠️</tg-emoji> <b>Технические работы.</b>\nЭтот раздел временно недоступен.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:menu")]]).reply_markup,
       },
     );
     return;
@@ -3113,8 +3919,19 @@ bot.on("callback_query", async (ctx, next) => {
       ]).reply_markup,
     };
     const targetAdmins = Array.from(new Set<number>([Number(owner?.tg_id || 0), ...ADMIN_IDS.map((x) => Number(x))])).filter((x) => x > 0);
+    const filteredTargetAdmins: number[] = [];
+    for (const tgId of targetAdmins) {
+      const u = db.prepare("SELECT id FROM users WHERE tg_id = ?").get(tgId) as any;
+      if (!u) {
+        filteredTargetAdmins.push(tgId);
+        continue;
+      }
+      ensureNotificationPrefs(Number(u.id));
+      const pref = db.prepare("SELECT notif_rent FROM notification_prefs WHERE user_id = ?").get(u.id) as any;
+      if (Number(pref?.notif_rent ?? 1) === 1) filteredTargetAdmins.push(tgId);
+    }
     db.prepare("DELETE FROM rent_request_messages WHERE rental_id = ? AND user_id = ?").run(rent.id, me.id);
-    for (const adminTgId of targetAdmins) {
+    for (const adminTgId of filteredTargetAdmins) {
       const sent = await bot.telegram.sendMessage(adminTgId, requestText, requestMarkup).catch(() => null as any);
       if (sent?.message_id) {
         db.prepare("INSERT INTO rent_request_messages (rental_id, user_id, admin_tg_id, message_id) VALUES (?, ?, ?, ?)")

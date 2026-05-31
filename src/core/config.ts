@@ -21,7 +21,6 @@ export const STEAMWEBAPI_BASE_URL = (process.env.STEAMWEBAPI_BASE_URL || "https:
 export const roleLabel: Record<Role, string> = {
   ADMIN: "🤴 Администратор",
   DOBIVER: "💇 Добивер",
-  SELLER: "👨‍💻 Продавец",
   LANDLORD: "👨‍💻 Арендодатель",
   CHATER: "👨‍💻 Чатер",
   USER: "👨‍🔧 Пользователь",
@@ -30,7 +29,6 @@ export const roleLabel: Record<Role, string> = {
 export const roleLabelPlain: Record<Role, string> = {
   ADMIN: "Администратор",
   DOBIVER: "Добивер",
-  SELLER: "Продавец",
   LANDLORD: "Арендодатель",
   CHATER: "Чатер",
   USER: "Пользователь",

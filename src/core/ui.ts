@@ -8,10 +8,11 @@ export const mainKb = Markup.keyboard([
 ]).resize();
 
 export const adminKb = Markup.keyboard([
-  ["Список пользователей", "Управление пользователями"],
+  ["Пользователи"],
   ["Рассылка", "Статистика"],
   ["Логи", "Уведомления"],
-  ["Заявки на вступление", "Заявки на работу"],
+  ["Заявки на вступление", "Заявки на добив"],
+  ["Заявки на проверку", "Заявки на аренду"],
 ]).resize();
 
 export function langInlineKb(currentLangRaw: string) {

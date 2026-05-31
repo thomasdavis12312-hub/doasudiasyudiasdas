@@ -1909,15 +1909,8 @@ async function renderOwnProfile(ctx: Ctx, me: any) {
     parse_mode: "HTML" as const,
     reply_markup: Markup.inlineKeyboard([[Markup.button.callback(`Отображение в ${next}`, "profile:currency:toggle")]]).reply_markup,
   };
-  const avatarUrl = String(refreshed.discord_avatar_url || "").trim();
-  if (avatarUrl) {
-    const sent = await ctx.replyWithPhoto(avatarUrl, {
-      caption: text,
-      ...extra,
-    }).catch(() => null);
-    if (sent) return sent;
-    return ctx.reply(text, extra);
-  }
+  // Discord CDN avatars can intermittently fail in Telegram (wrong type of web page content),
+  // which breaks profile flow for some users. Keep profile delivery stable by sending text only.
   return ctx.reply(text, extra);
 }
 
@@ -4262,12 +4255,36 @@ steamReadyPromise = ensureSteamRendererReady();
 steamWarmupPromise = warmupSteamRenderer();
 console.log("[DISCORD OAUTH] init requested (pre-launch)");
 startDiscordOAuthServer();
-bot.launch().then(async () => {
-  console.log("Bot started with SQLite", DB_PATH);
-  await configureBotCommands(bot, ADMIN_IDS).catch(() => null);
-  startOnlineWatchLoop();
-  steamWarmupPromise?.catch(() => null);
-});
+let botStarted = false;
+let launchRetryTimer: NodeJS.Timeout | null = null;
+const scheduleLaunchRetry = () => {
+  if (launchRetryTimer) return;
+  launchRetryTimer = setTimeout(() => {
+    launchRetryTimer = null;
+    void startBot();
+  }, 15000);
+};
+const startBot = async () => {
+  try {
+    await bot.launch();
+    if (!botStarted) {
+      botStarted = true;
+      console.log("Bot started with SQLite", DB_PATH);
+      await configureBotCommands(bot, ADMIN_IDS).catch(() => null);
+      startOnlineWatchLoop();
+      steamWarmupPromise?.catch(() => null);
+    }
+  } catch (e: any) {
+    const code = String(e?.code || e?.errno || "");
+    if (code === "ETIMEDOUT" || String(e?.message || "").includes("ETIMEDOUT")) {
+      console.error("[BOT LAUNCH] Telegram timeout, retry in 15s");
+    } else {
+      console.error("[BOT LAUNCH] Failed, retry in 15s:", e?.message || e);
+    }
+    scheduleLaunchRetry();
+  }
+};
+void startBot();
 process.once("SIGINT", async () => {
   bot.stop("SIGINT");
   await steamBrowser?.close().catch(() => null);

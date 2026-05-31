@@ -114,7 +114,10 @@ export function registerBasicHandlers(bot: any, deps: any) {
     const text = await formatProfile(row);
     const avatarUrl = String(row.discord_avatar_url || "").trim();
     if (avatarUrl) {
-      await ctx.replyWithPhoto(avatarUrl, { caption: text, parse_mode: "HTML" });
+      const sent = await ctx.replyWithPhoto(avatarUrl, { caption: text, parse_mode: "HTML" }).catch(() => null);
+      if (!sent) {
+        await ctx.reply(text, { parse_mode: "HTML" }).catch(() => null);
+      }
     } else {
       await ctx.reply(text, { parse_mode: "HTML" });
     }

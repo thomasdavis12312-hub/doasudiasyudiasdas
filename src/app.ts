@@ -1911,10 +1911,12 @@ async function renderOwnProfile(ctx: Ctx, me: any) {
   };
   const avatarUrl = String(refreshed.discord_avatar_url || "").trim();
   if (avatarUrl) {
-    return ctx.replyWithPhoto(avatarUrl, {
+    const sent = await ctx.replyWithPhoto(avatarUrl, {
       caption: text,
       ...extra,
-    });
+    }).catch(() => null);
+    if (sent) return sent;
+    return ctx.reply(text, extra);
   }
   return ctx.reply(text, extra);
 }

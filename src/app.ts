@@ -810,6 +810,11 @@ function hasRole(user: any, roles: Role[]) {
   return user.roles.some((r: Role) => roles.includes(r));
 }
 
+function hasLinkedDiscord(user: any) {
+  const v = String(user?.discord_tag || "").trim();
+  return v.length > 0 && v !== "-";
+}
+
 function logEvent(user: any, eventType: string, details: string) {
   db.prepare(
     "INSERT INTO logs (actor_user_id, actor_tg_id, actor_role, event_type, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2404,7 +2409,7 @@ bot.on("text", async (ctx) => {
   if (!me || me.is_banned) return;
 
   const text = ctx.message.text;
-  if (!me.is_approved) {
+  if (!me.is_approved || !hasLinkedDiscord(me)) {
     await syncChatCommandsForUser(bot, me, (u) => hasRole(u, ["ADMIN"]));
     if (text !== "/start") await ctx.reply("❗️Сначала привяжите Discord через /start.");
     return;
@@ -3385,9 +3390,9 @@ bot.on("callback_query", async (ctx, next) => {
   const data = ctx.callbackQuery.data;
   const me = ensureUser(ctx);
   if (!me) return;
-  const allowAdminJoinReviewWhileUnapproved =
+  const allowAdminJoinReviewWhileUnapprovedOrUnlinked =
     hasRole(me, ["ADMIN"]) && (data.startsWith("join:") || data.startsWith("joinreq:"));
-  if (!me.is_approved && data !== "register:discord:unavailable" && !allowAdminJoinReviewWhileUnapproved) {
+  if ((!me.is_approved || !hasLinkedDiscord(me)) && data !== "register:discord:unavailable" && !allowAdminJoinReviewWhileUnapprovedOrUnlinked) {
     await ctx.answerCbQuery("Сначала привяжите Discord через /start", { show_alert: true }).catch(() => null);
     return;
   }

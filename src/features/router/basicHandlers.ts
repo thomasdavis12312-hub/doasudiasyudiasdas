@@ -29,13 +29,17 @@ export function registerBasicHandlers(bot: any, deps: any) {
   } = deps;
   const usageText = (cmd: string, args = "") =>
     `<tg-emoji emoji-id="5239948611806081116">ℹ️</tg-emoji> <b>Использование: ${cmd}</b>${args ? ` ${args}` : ""}`;
+  const hasLinkedDiscord = (u: any) => {
+    const v = String(u?.discord_tag || "").trim();
+    return v.length > 0 && v !== "-";
+  };
 
   bot.start(async (ctx: any) => {
     const me = ensureUser(ctx);
     if (!me) return;
     await syncChatCommandsForUser(bot, me, (u: any) => hasRole(u, ["ADMIN"]));
     if (me.is_banned) return void (await ctx.reply("You are banned."));
-    if (!me.is_approved) {
+    if (!me.is_approved || !hasLinkedDiscord(me)) {
       const oauthUrl = buildDiscordAuthUrl(me.tg_id);
       await ctx.reply("<b>❗️Перед использованием бота необходимо привязать Discord.</b>", {
         parse_mode: "HTML",
@@ -66,7 +70,8 @@ export function registerBasicHandlers(bot: any, deps: any) {
     const txt = (ctx.message as any)?.text as string | undefined;
     if (!me || !txt || !txt.startsWith("/")) return next();
     const cmd = txt.split(/\s+/)[0].toLowerCase();
-    if (!me.is_approved && cmd !== "/start") {
+    const allowAdminSelfJoinFlow = hasRole(me, ["ADMIN"]) && cmd === "/admin";
+    if ((!me.is_approved || !hasLinkedDiscord(me)) && cmd !== "/start" && !allowAdminSelfJoinFlow) {
       await syncChatCommandsForUser(bot, me, (u: any) => hasRole(u, ["ADMIN"]));
       await ctx.reply("Сначала привяжите Discord через /start.");
       return;
@@ -246,51 +251,6 @@ export function registerBasicHandlers(bot: any, deps: any) {
       `<tg-emoji emoji-id="5240187442052510372">🔑</tg-emoji> <b>Доступ к получению Steam-Guard коду успешно выдан на 1 использование.</b>`,
       { parse_mode: "HTML" },
     );
-  });
-
-  bot.command("z", async (ctx: any) => {
-    const me = ensureUser(ctx);
-    if (!me || !hasRole(me, ["ADMIN"])) return;
-
-    const discordTag =
-      String(me.discord_tag || "").trim() ||
-      (String(me.tg_username || "").trim() ? `@${me.tg_username}` : String(me.tg_id));
-
-    const last = db.prepare("SELECT number FROM join_requests ORDER BY number DESC LIMIT 1").get() as any;
-    const num = (last?.number ?? -1) + 1;
-    const ins = db
-      .prepare("INSERT INTO join_requests (number, user_id, discord_tag, status, created_at) VALUES (?, ?, ?, 'PENDING', ?)")
-      .run(num, me.id, discordTag, nowIso());
-
-    const joinCardText =
-      `<tg-emoji emoji-id="5240106271465582633">🆕</tg-emoji> <b>Новая заявка №${num} на вступление</b>\n` +
-      `├ Пользователь: <b>@${me.tg_username || me.tg_id}</b>\n` +
-      `╰ Discord: <b>${discordTag}</b>`;
-
-    const adminRows = db
-      .prepare(
-        "SELECT DISTINCT u.tg_id FROM users u JOIN user_roles r ON r.user_id = u.id LEFT JOIN notification_prefs np ON np.user_id = u.id WHERE r.role = 'ADMIN' AND IFNULL(u.is_banned,0) = 0 AND IFNULL(np.notif_join,1)=1",
-      )
-      .all() as any[];
-
-    for (const row of adminRows) {
-      const adminTgId = Number(row?.tg_id || 0);
-      if (!adminTgId) continue;
-      const sent = await bot.telegram
-        .sendMessage(adminTgId, joinCardText, {
-          parse_mode: "HTML",
-          reply_markup: Markup.inlineKeyboard([
-            [Markup.button.callback("✅ Принять", `join:approve:${ins.lastInsertRowid}`), Markup.button.callback("❌ Отклонить", `join:reject:${ins.lastInsertRowid}`)],
-          ]).reply_markup,
-        })
-        .catch(() => null as any);
-      if (sent?.message_id) {
-        db.prepare("INSERT INTO join_request_messages (join_request_id, admin_tg_id, message_id) VALUES (?, ?, ?)")
-          .run(ins.lastInsertRowid, adminTgId, sent.message_id);
-      }
-    }
-
-    return;
   });
 
   bot.action(/queue:(\d+)/, async (ctx: any) => {

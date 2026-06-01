@@ -822,31 +822,29 @@ function logEvent(user: any, eventType: string, details: string) {
   ).run(user?.id || null, user?.tg_id || null, user?.roles?.[0] || "USER", eventType, details, nowIso());
 }
 
-const STEAM_TEMPLATE_HTML_PATH =
-  process.env.STEAM_TEMPLATE_HTML_PATH || "C:/Users/xvapl/Downloads/Ryan Cooper ?????.html";
+const STEAM_TEMPLATE_HTML_PATH = process.env.STEAM_TEMPLATE_HTML_PATH || "";
 async function resolveSteamFriendTemplatePath(): Promise<string> {
-  if (process.env.STEAM_TEMPLATE_HTML_PATH) return process.env.STEAM_TEMPLATE_HTML_PATH;
-  const downloadsDir = "C:/Users/xvapl/Downloads";
-  const candidates = [
-    "Ryan Cooper ?????.html",
-    "Steam Community __ cuteboy.html",
-    "Steam Community __ Ryan Cooper ?????.html",
+  if (STEAM_TEMPLATE_HTML_PATH) return STEAM_TEMPLATE_HTML_PATH;
+  const projectTemplatesDir = path.join(process.cwd(), "src", "templates");
+  const projectCandidates = [
+    "Ryan Cooper ᵛᵃˡᵛᵉ.html",
+    "Ryan Cooper valve.html",
   ];
-  for (const name of candidates) {
-    const p = path.join(downloadsDir, name);
+  for (const name of projectCandidates) {
+    const p = path.join(projectTemplatesDir, name);
     try {
       await fs.access(p);
       return p;
     } catch {}
   }
   try {
-    const files = await fs.readdir(downloadsDir);
+    const files = await fs.readdir(projectTemplatesDir);
     const picked =
       files.find((f) => /^Ryan Cooper .*\.html$/i.test(f)) ||
       files.find((f) => /^Steam Community __ .*\.html$/i.test(f));
-    if (picked) return path.join(downloadsDir, picked);
+    if (picked) return path.join(projectTemplatesDir, picked);
   } catch {}
-  return STEAM_TEMPLATE_HTML_PATH;
+  throw new Error("Steam friend template HTML not found. Put it in src/templates or set STEAM_TEMPLATE_HTML_PATH.");
 }
 const PROFILE_ACTIONS_HTML = `<a data-panel="{&quot;autoFocus&quot;:true,&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}" role="button" id="btn_add_friend" class="btn_profile_action btn_medium" href="javascript:AddFriend()"><span>Add Friend</span></a>
 <span data-panel="{&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}" role="button" class="btn_profile_action btn_medium" id="profile_action_dropdown_link" onclick="ShowMenu( this, 'profile_action_dropdown', 'right' );"><span>More... <img src="https://community.fastly.steamstatic.com/public/images/profile/profile_action_dropdown.png"></span></span>
@@ -1148,7 +1146,9 @@ async function fetchSteamProfileData(
     };
   }
   try {
-    const normalized = profileUrl.replace(/\/+$/, "");
+    const normalizedRaw = profileUrl.replace(/\/+$/, "");
+    const canonicalMatch = normalizedRaw.match(/(https?:\/\/[^/]+\/(?:profiles\/7\d{15,18}|id\/[A-Za-z0-9_-]{2,64}))\/?/i);
+    const normalized = canonicalMatch ? canonicalMatch[1] : normalizedRaw;
     await ensureSteamRendererReady();
     if (!steamSourcePage || steamSourcePage.isClosed?.()) {
       await ensureSteamRendererReady();
@@ -1191,7 +1191,7 @@ async function fetchSteamProfileData(
       const avatarFrame = frameRaw.split(" ")[0] || null;
       return { name, level, levelClass, avatarFull, avatarFrame, rightColHtml, badgeHtml, headerContentHtml, profilePageHtml, bodyClass };
     })) as any;
-    if (parsed?.name) {
+    if (parsed?.name && !/^sign\s*in$/i.test(String(parsed.name).trim())) {
       const toAbs = (u: string | null) => {
         if (!u) return null;
         try {
@@ -1229,7 +1229,7 @@ async function fetchSteamProfileData(
     const data: any = await res.json().catch(() => null);
     const raw = String(data?.author_name || data?.title || "").trim();
     const name = raw.replace(/^Steam Community ::\s*/i, "").trim();
-    if (name) {
+    if (name && !/^sign\s*in$/i.test(name)) {
       steamProfileCache.set(profileUrl, {
         name,
         avatarFull: null,
@@ -1267,12 +1267,136 @@ async function fetchSteamProfileData(
 }
 
 
-async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
+async function extractFriendPageDataFromInviteLink(inviteUrl: string): Promise<{
+  name: string;
+  avatarFull: string | null;
+  avatarMedium: string | null;
+  avatarFrame: string | null;
+}> {
+  // Primary path: parse with Playwright page context (more reliable than raw fetch for anti-bot/protected pages).
+  try {
+    await ensureSteamRendererReady();
+    if (!steamSourcePage || steamSourcePage.isClosed?.()) {
+      await ensureSteamRendererReady();
+    }
+    await steamSourcePage.goto(inviteUrl, { waitUntil: "domcontentloaded", timeout: 12000 });
+    await steamSourcePage.waitForTimeout(120);
+    const parsed = (await steamSourcePage.evaluate(() => {
+      const name =
+        (document.querySelector(".actual_persona_name") as HTMLElement | null)?.innerText?.trim() ||
+        (document.querySelector(".persona_name .actual_persona_name") as HTMLElement | null)?.innerText?.trim() ||
+        "";
+      const avatarWrap =
+        (document.querySelector(".playerAvatarAutoSizeInner") as HTMLElement | null) ||
+        (document.querySelector(".playerAvatar.profile_header_size .playerAvatarAutoSizeInner") as HTMLElement | null);
+      const frameSrc =
+        (avatarWrap?.querySelector(".profile_avatar_frame img") as HTMLImageElement | null)?.getAttribute("src") ||
+        (avatarWrap?.querySelector(".profile_avatar_frame source") as HTMLSourceElement | null)?.getAttribute("srcset") ||
+        null;
+      const avatarSrc =
+        (avatarWrap?.querySelector("img[srcset*='_full']") as HTMLImageElement | null)?.getAttribute("srcset") ||
+        (avatarWrap?.querySelector("img[src*='_full']") as HTMLImageElement | null)?.getAttribute("src") ||
+        (avatarWrap?.querySelector("source[srcset*='_full']") as HTMLSourceElement | null)?.getAttribute("srcset") ||
+        null;
+      return {
+        name: String(name || "").trim(),
+        avatarSrc: String(avatarSrc || "").trim(),
+        frameSrc: String(frameSrc || "").trim(),
+      };
+    })) as any;
+    const toAbs = (raw: string | null) => {
+      if (!raw) return null;
+      const clean = String(raw).replace(/\s+\d+x$/i, "").trim();
+      try {
+        return new URL(clean, inviteUrl).toString();
+      } catch {
+        return clean;
+      }
+    };
+    const name = String(parsed?.name || "").trim();
+    if (name && !/^sign\s*in$/i.test(name)) {
+      const avatarFull = toAbs(parsed?.avatarSrc || null);
+      const avatarFrame = toAbs(parsed?.frameSrc || null);
+      const avatarMedium = avatarFull ? avatarFull.replace(/_full\.(jpg|png|webp)$/i, "_medium.$1") : null;
+      return { name, avatarFull, avatarMedium, avatarFrame };
+    }
+  } catch {}
+
+  const html = (await fetchTextSafe(inviteUrl)) || "";
+  const decodeHtml = (value: string) =>
+    value
+      .replace(/&quot;/g, "\"")
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#x2F;/gi, "/")
+      .replace(/&#47;/g, "/")
+      .trim();
+  const pickMeta = (prop: string) => {
+    const re = new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, "i");
+    return html.match(re)?.[1]?.trim() || null;
+  };
+
+  const personaRaw = html.match(/<span[^>]*class=["'][^"']*\bactual_persona_name\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i)?.[1] || "";
+  const nameFromPersona = decodeHtml(personaRaw.replace(/<[^>]+>/g, "").trim());
+
+  const avatarBlock = html.match(/<div[^>]*class=["'][^"']*\bplayerAvatarAutoSizeInner\b[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*<\/div>/i)?.[1] || "";
+  const frameRaw =
+    avatarBlock.match(/<div[^>]*class=["'][^"']*\bprofile_avatar_frame\b[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i)?.[1] ||
+    avatarBlock.match(/<div[^>]*class=["'][^"']*\bprofile_avatar_frame\b[^"']*["'][^>]*>[\s\S]*?<source[^>]+srcset=["']([^"']+)["']/i)?.[1] ||
+    null;
+  const avatarRaw =
+    avatarBlock.match(/<img[^>]+srcset=["']([^"']*_full\.(?:jpg|png|webp)[^"']*)["']/i)?.[1] ||
+    avatarBlock.match(/<img[^>]+src=["']([^"']*_full\.(?:jpg|png|webp)[^"']*)["']/i)?.[1] ||
+    avatarBlock.match(/<source[^>]+srcset=["']([^"']*_full\.(?:jpg|png|webp)[^"']*)["']/i)?.[1] ||
+    null;
+
+  const toAbs = (raw: string | null) => {
+    if (!raw) return null;
+    const clean = decodeHtml(raw.replace(/\s+\d+x$/i, "").trim());
+    try {
+      return new URL(clean, inviteUrl).toString();
+    } catch {
+      return clean;
+    }
+  };
+
+  const titleRaw =
+    pickMeta("og:title") ||
+    pickMeta("twitter:title") ||
+    html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() ||
+    "";
+  const nameFromTitle = decodeHtml(
+    titleRaw
+      .replace(/^Steam Community ::\s*/i, "")
+      .replace(/\s*\|\s*Sign In.*$/i, "")
+      .trim(),
+  );
+  const name = nameFromPersona || nameFromTitle || "Ryan Cooper valve";
+  const avatarFull = toAbs(avatarRaw) || toAbs(pickMeta("og:image")) || toAbs(pickMeta("twitter:image"));
+  const avatarFrame = toAbs(frameRaw);
+  const avatarMedium = avatarFull ? avatarFull.replace(/_full\.(jpg|png|webp)$/i, "_medium.$1") : null;
+  return { name, avatarFull, avatarMedium, avatarFrame };
+}
+
+async function makeSteamFriendPageFromTemplateScreenshot(
+  inviteUrl: string,
+  options?: { variant?: "normal" | "not_found"; friendCode?: string },
+) {
   const task = async () => {
     await ensureSteamRendererReady();
-    const profile = await fetchSteamProfileData(profileUrl);
-    if (!profile?.name) {
-      throw new Error("profile_data_not_found");
+    let profile: { name: string; avatarFull: string | null; avatarMedium: string | null; avatarFrame: string | null } | null = null;
+    try {
+      profile = await extractFriendPageDataFromInviteLink(inviteUrl);
+    } catch {}
+    if (!profile) {
+      profile = {
+        name: "Cute",
+        avatarFull: null,
+        avatarMedium: null,
+        avatarFrame: null,
+      };
     }
     if (!steamTemplatePage || steamTemplatePage.isClosed?.()) {
       await ensureSteamRendererReady();
@@ -1285,9 +1409,11 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
     const filesDirs = (await fs.readdir(templateDir, { withFileTypes: true }))
       .filter((d) => d.isDirectory() && /_files$/i.test(d.name))
       .map((d) => d.name);
+    const templateBase = path.basename(templatePath, path.extname(templatePath));
+    const expectedFilesDir = `${templateBase}_files`;
     const fallbackFilesDir =
-      filesDirs.find((n) => n.toLowerCase().includes("ryan cooper")) ||
-      filesDirs.find((n) => n.toLowerCase().includes("steam community __")) ||
+      filesDirs.find((n) => n === expectedFilesDir) ||
+      filesDirs.find((n) => n.toLowerCase() === expectedFilesDir.toLowerCase()) ||
       filesDirs[0] ||
       "";
     const filesAbsDir = fallbackFilesDir ? path.join(templateDir, fallbackFilesDir).replace(/\\/g, "/") : "";
@@ -1306,9 +1432,37 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
       waitUntil: "domcontentloaded",
       timeout: 12000,
     });
-    await page.waitForTimeout(110);
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
+    await page
+      .waitForFunction(
+        () => {
+          const links = Array.from(document.querySelectorAll('link[rel="stylesheet"]')) as HTMLLinkElement[];
+          const stylesReady = links.every((link) => {
+            try {
+              return Boolean((link.sheet as CSSStyleSheet | null)?.cssRules || link.sheet);
+            } catch {
+              // Cross-origin cssRules may throw, sheet presence is enough in that case.
+              return Boolean(link.sheet);
+            }
+          });
+          const images = Array.from(document.images || []) as HTMLImageElement[];
+          const imagesReady = images.every((img) => img.complete);
+          return stylesReady && imagesReady;
+        },
+        { timeout: 5000, polling: 120 },
+      )
+      .catch(() => null);
+    await page.waitForTimeout(220);
 
-    await page.evaluate((data: { name: string; avatarFull: string | null; avatarMedium: string | null; avatarFrame: string | null; friendCode: string; inviteLink: string }) => {
+    await page.evaluate((data: {
+      name: string;
+      avatarFull: string | null;
+      avatarMedium: string | null;
+      avatarFrame: string | null;
+      friendCode: string;
+      inviteLink: string;
+      variant: "normal" | "not_found";
+    }) => {
       const setText = (selector: string, value: string) => {
         const el = document.querySelector(selector);
         if (el) el.textContent = value;
@@ -1318,9 +1472,14 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
         const el = document.querySelector(selector) as HTMLElement | null;
         if (el) el.setAttribute(attr, value);
       };
-
       setText(".friends_header_name a", data.name);
       setText(".responsive_menu_user_persona .persona a[data-miniprofile]", data.name);
+      setText("#global_action_menu .global_action_link", data.name);
+      setText(".menuitem.supernav_active.username", data.name);
+      setText("#account_pulldown", data.name);
+      document.querySelectorAll(".menuitem.supernav_active.username").forEach((el) => {
+        (el as HTMLElement).innerHTML = data.name;
+      });
 
       const avatar = data.avatarFull || data.avatarMedium;
       const resolveAbs = (url: string | null) => {
@@ -1339,6 +1498,36 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
 
       setAttr(".responsive_menu_user_persona .playerAvatar img", "src", avatarAbs);
       setAttr(".responsive_menu_user_persona .playerAvatar img", "alt", data.name);
+      setAttr("#global_action_menu img", "src", avatarAbs);
+      setAttr("#global_action_menu img", "srcset", avatarAbs);
+      setAttr("#global_actions .user_avatar img", "src", avatarAbs);
+      setAttr("#global_actions .user_avatar img", "srcset", avatarAbs);
+      setAttr("#global_actions .user_avatar img", "alt", data.name);
+      setAttr("#global_actions .user_avatar", "aria-label", `View ${data.name} profile`);
+
+      // Keep native header layout/styles, only replace auth text/avatar in-place.
+      const signInNodes = Array.from(document.querySelectorAll("#global_header a, #global_header span, #global_header div"));
+      signInNodes.forEach((el) => {
+        const txt = (el.textContent || "").trim();
+        if (/^sign\s*in$/i.test(txt)) {
+          el.textContent = data.name;
+        }
+      });
+      const headerAvatarTargets = Array.from(document.querySelectorAll("#global_actions img, #global_action_menu img")) as HTMLImageElement[];
+      headerAvatarTargets.forEach((img) => {
+        if (!avatarAbs) return;
+        img.setAttribute("src", avatarAbs);
+        img.setAttribute("srcset", avatarAbs);
+        img.setAttribute("alt", data.name);
+      });
+      const walletBalance = document.querySelector("#header_wallet_balance") as HTMLElement | null;
+      if (walletBalance) walletBalance.textContent = "$0.52 USD";
+      document.querySelectorAll(".popup_menu_item .account_name").forEach((n) => {
+        const text = (n.textContent || "").trim();
+        if (/\$/.test(text) || /mex\$/i.test(text)) {
+          (n as HTMLElement).textContent = "$0.52 USD";
+        }
+      });
 
       const avatarPictureImg = document.querySelector(".playerAvatarAutoSizeInner > picture:last-of-type img") as HTMLImageElement | null;
       if (avatarPictureImg && avatarAbs) {
@@ -1399,10 +1588,6 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
         overlay.style.height = `${imgRect.height * scale}px`;
       }
 
-      const codeEl = Array.from(document.querySelectorAll("h1, div, span"))
-        .find((el) => /^\d{8,}$/.test((el.textContent || "").trim())) as HTMLElement | undefined;
-      if (codeEl) codeEl.textContent = data.friendCode;
-
       const quickInviteEl =
         (document.querySelector("._1HjkZ3ooQw-4TV518YPtvp ._18Sc08YQfmAIVx8H1h8A1V") as HTMLElement | null) ||
         (Array.from(document.querySelectorAll("div, span, a"))
@@ -1416,13 +1601,59 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
       if (inviteSearchInput) {
         inviteSearchInput.placeholder = "Enter the profile link from the invitation";
       }
+
+      const friendCodeInput = (Array.from(document.querySelectorAll("input[type='text'], input.DialogInput")) as HTMLInputElement[])
+        .find((input) => {
+          const placeholder = String(input.getAttribute("placeholder") || "").trim().toLowerCase();
+          if (placeholder.includes("profile name")) return false;
+          return (
+            placeholder === "enter a friend code" ||
+            placeholder.includes("friend code") ||
+            input.classList.contains("DialogTextInputBase")
+          );
+        }) || null;
+      if (data.variant === "not_found" && friendCodeInput) {
+        friendCodeInput.value = data.friendCode;
+        friendCodeInput.setAttribute("value", data.friendCode);
+      }
+
+      document.querySelector("#codex-region-mismatch")?.remove();
+      if (data.variant === "not_found" && friendCodeInput) {
+        const wrap = document.createElement("div");
+        wrap.id = "codex-region-mismatch";
+        wrap.style.marginTop = "10px";
+        wrap.innerHTML = `
+          <style>
+            .quick_invite_link { color: #66c0f4; font-weight: 500; }
+          </style>
+          <div class="_28a_CNvDls7VgWoPW2-9Kz">
+            <div class="_29w-2Eb_kk-viSqGW8RTn2">
+              <div class="_1qz9xLw5YttjO8gVfuMwS">
+                <h1 class="_3kTQIYYiQiVR_DeJepkOwJ">Unable adding friend. Region mismatch</h1>
+                <div class="_1tEt0fYckNbFAqGLEfrsfj region_notice">
+                  <span class="_2s393FLIe2l5quVJHoS53K">
+                    Note: You can still be added by this user using a
+                    <span class="quick_invite_link">Quick Invite link</span>.
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+        const insertAnchor =
+          (friendCodeInput.closest("._1tEt0fYckNbFAqGLEfrsfj") as HTMLElement | null) ||
+          (friendCodeInput.parentElement as HTMLElement | null) ||
+          friendCodeInput;
+        insertAnchor.insertAdjacentElement("afterend", wrap);
+      }
     }, {
       name: profile.name,
       avatarFull: profile.avatarFull,
       avatarMedium: profile.avatarMedium,
       avatarFrame: profile.avatarFrame,
-      friendCode: "11016760945",
-      inviteLink: profileUrl,
+      friendCode: String(options?.friendCode || "11016760945"),
+      inviteLink: inviteUrl,
+      variant: options?.variant === "not_found" ? "not_found" : "normal",
     });
 
     await page
@@ -1437,9 +1668,217 @@ async function makeSteamFriendPageFromTemplateScreenshot(profileUrl: string) {
       .catch(() => null);
     await page.screenshot({
       path: screenshotPath,
-      clip: STEAM_SCREENSHOT_CLIP_DEFAULT,
+      clip: { x: STEAM_SCREENSHOT_CLIP_DEFAULT.x, y: 0, width: STEAM_SCREENSHOT_CLIP_DEFAULT.width, height: 1160 },
     });
     return screenshotPath;
+  };
+
+  const run = steamRenderChain.then(task, task);
+  steamRenderChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function makeSteamQrPageScreenshot(displayTime: string, inviteLink: string) {
+  const task = async () => {
+    await ensureSteamRendererReady();
+    if (!steamTemplatePage || steamTemplatePage.isClosed?.()) {
+      await ensureSteamRendererReady();
+    }
+    const page = steamTemplatePage;
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const tmpDir = await fs.mkdtemp(path.join(process.cwd(), ".tmp-steam-qr-"));
+    const tempHtmlPath = path.join(tmpDir, `qr_page_${stamp}.html`);
+    const screenshotPath = path.join(tmpDir, `qr_page_${stamp}.png`);
+    const pngTemplatePath = path.join(process.cwd(), "src", "templates", "photo.png");
+    const jpgTemplatePath = path.join(process.cwd(), "src", "templates", "photo.jpg");
+    let templateImagePath = pngTemplatePath;
+    try {
+      await fs.access(templateImagePath);
+    } catch {
+      templateImagePath = jpgTemplatePath;
+      await fs.access(templateImagePath);
+    }
+    const templateImageUrl = `file:///${templateImagePath.replace(/\\/g, "/")}`;
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=420x420&margin=0&data=${encodeURIComponent(inviteLink)}`;
+    let avatarUrl = "";
+    let profileName = "";
+    try {
+      const profile = await extractFriendPageDataFromInviteLink(inviteLink);
+      avatarUrl = String(profile?.avatarFull || profile?.avatarMedium || "").trim();
+      profileName = String(profile?.name || "").trim();
+    } catch {}
+    const safeAvatarUrl = avatarUrl ? escapeHtml(avatarUrl) : "";
+    const safeProfileName = profileName ? escapeHtml(profileName) : "";
+    const buildHtml = (showQrImage: boolean) => `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      position: relative;
+      color: #fff;
+      display: inline-block;
+      background: #000;
+    }
+    .bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .avatar-main {
+      position: absolute;
+      left: 48.02px;
+      top: 184.25px;
+      width: 96.50px;
+      height: 97.35px;
+      object-fit: cover;
+      z-index: 2;
+    }
+    .avatar-mini {
+      position: absolute;
+      left: 513.25px;
+      top: 104.75px;
+      width: 60.25px;
+      height: 59.99px;
+      object-fit: cover;
+      z-index: 2;
+    }
+    .profile-name {
+      position: absolute;
+      left: 174px;
+      top: 211.48px;
+      font-family: "Motiva Sans", sans-serif;
+      color: rgb(235, 235, 235);
+      font-size: 36px;
+      line-height: 1.12;
+      font-weight: 400;
+      white-space: nowrap;
+      z-index: 2;
+      text-shadow: 0 1px 2px rgba(0,0,0,.3);
+    }
+    .ios-time {
+      position: absolute;
+      left: 58px;
+      top: 30px;
+      font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      font-size: 26px;
+      font-weight: 500;
+      letter-spacing: 0.2px;
+      z-index: 2;
+      color: #ffffff;
+      text-shadow: 0 1px 2px rgba(0,0,0,.5);
+    }
+    .qr {
+      position: absolute;
+      left: 212.5px;
+      top: 519px;
+      width: 176px;
+      height: 176px;
+      z-index: 2;
+      object-fit: contain;
+      image-rendering: pixelated;
+      border-radius: 0;
+      background: #fff;
+    }
+    .qr-fallback {
+      position: absolute;
+      left: 182px;
+      top: 454px;
+      width: 224px;
+      height: 224px;
+      z-index: 2;
+      border-radius: 14px;
+      background: #fff;
+      color: #1a1a1a;
+      font-size: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .link-box {
+      position: absolute;
+      left: 40px;
+      top: 1037px;
+      width: 335px;
+      height: 86px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      overflow: hidden;
+      z-index: 2;
+      padding: 6px 10px;
+    }
+    .link {
+      color: rgba(206, 206, 206, 1);
+      width: 100%;
+      font-size: 22px;
+      line-height: 1.12;
+      font-weight: 400;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      text-shadow: 0 1px 2px rgba(0,0,0,.3);
+    }
+  </style>
+</head>
+<body>
+  <img class="bg" src="${templateImageUrl}" alt="template" />
+  ${safeAvatarUrl ? `<img class="avatar-main" src="${safeAvatarUrl}" alt="avatar" />` : ""}
+  ${safeAvatarUrl ? `<img class="avatar-mini" src="${safeAvatarUrl}" alt="avatar" />` : ""}
+  ${safeProfileName ? `<div class="profile-name">${safeProfileName}</div>` : ""}
+  <div class="ios-time">${escapeHtml(displayTime)}</div>
+  ${
+    showQrImage
+      ? `<img class="qr" src="${qrUrl}" alt="QR" />`
+      : `<div class="qr-fallback">QR</div>`
+  }
+  <div class="link-box"><div class="link">${escapeHtml(inviteLink)}</div></div>
+</body>
+</html>`;
+    const renderOnce = async (showQrImage: boolean) => {
+      await fs.writeFile(tempHtmlPath, buildHtml(showQrImage), "utf8");
+      await page.goto(`file:///${tempHtmlPath.replace(/\\/g, "/")}`, {
+        waitUntil: "domcontentloaded",
+        timeout: 12000,
+      });
+      await page
+        .waitForFunction(() => {
+          const img = document.querySelector(".bg") as HTMLImageElement | null;
+          return Boolean(img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
+        }, { timeout: 8000, polling: 80 })
+        .catch(() => null);
+      const dims = await page.evaluate(() => {
+        const img = document.querySelector(".bg") as HTMLImageElement | null;
+        const w = img?.naturalWidth || 590;
+        const h = img?.naturalHeight || 1280;
+        document.body.style.width = `${w}px`;
+        document.body.style.height = `${h}px`;
+        return { w, h };
+      });
+      await page.setViewportSize({ width: dims.w, height: dims.h });
+      await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
+      await page.waitForTimeout(350);
+      await page.screenshot({
+        path: screenshotPath,
+        clip: { x: 0, y: 0, width: dims.w, height: dims.h },
+      });
+      return screenshotPath;
+    };
+
+    try {
+      return await renderOnce(true);
+    } catch {
+      // Network/CDN issues for QR should not block file delivery.
+      return await renderOnce(false);
+    }
   };
 
   const run = steamRenderChain.then(task, task);
@@ -2689,12 +3128,167 @@ bot.on("text", async (ctx) => {
       await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => null);
     }
     const mode = st.mode.replace("draw_input:", "");
-    const normalized = normalizeProfileInput(text.trim());
-    if (!normalized) {
+    const rawInput = text.trim();
+    if (mode === "qr_page_link") {
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(rawInput);
+        if (!/^https?:$/i.test(parsed.protocol)) throw new Error("bad");
+      } catch {
+        await ctx.reply("Неверный формат ссылки. Пришлите корректную ссылку http/https.");
+        return;
+      }
+      const askTimeMsg = await ctx.reply(
+        `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите желаемое время на скриншоте.</b>`,
+        { parse_mode: "HTML" },
+      );
+      state.set(ctx.from.id, {
+        mode: "draw_input:qr_page_time",
+        payload: { inviteLink: parsed.toString(), promptMessageId: askTimeMsg.message_id },
+      });
+      return;
+    }
+    if (mode === "qr_page_time") {
+      const inviteLink = String(st.payload?.inviteLink || "").trim();
+      if (!inviteLink) {
+        state.delete(ctx.from.id);
+        await ctx.reply("Ссылка утеряна. Начните заново: QR-Код страница друга.");
+        return;
+      }
+      const displayTime = rawInput;
+      if (!displayTime) {
+        await ctx.reply("Время не должно быть пустым.");
+        return;
+      }
+      state.delete(ctx.from.id);
+      let drawTicker: NodeJS.Timeout | null = null;
+      let drawMsgId = 0;
+      let screenshotPath = "";
+      try {
+        const frames = ["Рисую.", "Рисую..", "Рисую..."] as const;
+        let frameIndex = 0;
+        const drawStatus = () =>
+          `<tg-emoji emoji-id="5240307658187119619">🎨</tg-emoji> <b>${frames[frameIndex]}</b>`;
+        const drawMsg = await ctx.reply(drawStatus(), { parse_mode: "HTML" });
+        drawMsgId = drawMsg.message_id;
+        drawTicker = setInterval(async () => {
+          frameIndex = (frameIndex + 1) % frames.length;
+          await ctx.telegram
+            .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
+            .catch(() => null);
+        }, 800);
+        screenshotPath = await makeSteamQrPageScreenshot(displayTime, inviteLink);
+        const fileName = `steam_profile_${Date.now()}.png`;
+        if (drawTicker) {
+          clearInterval(drawTicker);
+          drawTicker = null;
+        }
+        frameIndex = frames.length - 1;
+        await ctx.telegram
+          .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
+          .catch(() => null);
+        const sendDocPromise = ctx.replyWithDocument(Input.fromLocalFile(screenshotPath, fileName));
+        const deleteDrawPromise = drawMsgId > 0 ? ctx.deleteMessage(drawMsgId).catch(() => null) : Promise.resolve(null);
+        await Promise.all([sendDocPromise, deleteDrawPromise]);
+      } catch {
+        if (drawTicker) clearInterval(drawTicker);
+        if (drawMsgId > 0) {
+          await ctx.deleteMessage(drawMsgId).catch(() => null);
+        }
+        await ctx.reply("Не удалось создать скриншот QR-страницы.");
+      } finally {
+        if (screenshotPath) {
+          const dir = path.dirname(screenshotPath);
+          await fs.rm(dir, { recursive: true, force: true }).catch(() => null);
+        }
+      }
+      return;
+    }
+    if (mode === "friend_page_code") {
+      const inviteLink = String(st.payload?.inviteLink || "").trim();
+      if (!inviteLink) {
+        state.delete(ctx.from.id);
+        await ctx.reply("Ссылка утеряна. Начните заново: Страница друга -> Не найдено.");
+        return;
+      }
+      const friendCode = rawInput;
+      if (!friendCode) {
+        await ctx.reply("Код друга не должен быть пустым.");
+        return;
+      }
+      state.delete(ctx.from.id);
+      let drawTicker: NodeJS.Timeout | null = null;
+      let drawMsgId = 0;
+      let screenshotPath = "";
+      try {
+        const frames = ["Рисую.", "Рисую..", "Рисую..."] as const;
+        let frameIndex = 0;
+        const drawStatus = () =>
+          `<tg-emoji emoji-id="5240307658187119619">🎨</tg-emoji> <b>${frames[frameIndex]}</b>`;
+        const drawMsg = await ctx.reply(drawStatus(), { parse_mode: "HTML" });
+        drawMsgId = drawMsg.message_id;
+        drawTicker = setInterval(async () => {
+          frameIndex = (frameIndex + 1) % frames.length;
+          await ctx.telegram
+            .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
+            .catch(() => null);
+        }, 800);
+        screenshotPath = await makeSteamFriendPageFromTemplateScreenshot(inviteLink, {
+          variant: "not_found",
+          friendCode,
+        });
+        const fileName = `steam_profile_${Date.now()}.png`;
+        if (drawTicker) {
+          clearInterval(drawTicker);
+          drawTicker = null;
+        }
+        frameIndex = frames.length - 1;
+        await ctx.telegram
+          .editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" })
+          .catch(() => null);
+        const sendDocPromise = ctx.replyWithDocument(Input.fromLocalFile(screenshotPath, fileName));
+        const deleteDrawPromise = drawMsgId > 0 ? ctx.deleteMessage(drawMsgId).catch(() => null) : Promise.resolve(null);
+        await Promise.all([sendDocPromise, deleteDrawPromise]);
+      } catch (e) {
+        if (drawTicker) clearInterval(drawTicker);
+        if (drawMsgId > 0) {
+          await ctx.deleteMessage(drawMsgId).catch(() => null);
+        }
+        await ctx.reply("Не удалось создать скриншот. Убедитесь, что установлен playwright и доступен HTML-шаблон.");
+      } finally {
+        if (screenshotPath) {
+          const dir = path.dirname(screenshotPath);
+          await fs.rm(dir, { recursive: true, force: true }).catch(() => null);
+        }
+      }
+      return;
+    }
+    const normalized = mode === "friend_page" ? null : normalizeProfileInput(rawInput);
+    if (mode !== "friend_page" && !normalized) {
       await ctx.reply(
         "Неверный формат ссылки.\nУкажите Steam ID (16 цифр, начинается с 7) или ссылку:\nhttps://steamcommunity.com/profiles/76561199077889738/\nhttps://steamcommunity.com/id/ktese/\nhttps://my.steamchina.com/profiles/76561199881567552/\nhttps://my.steamchina.com/id/ktese/",
       );
       return;
+    }
+    if (mode === "friend_page") {
+      try {
+        const u = new URL(rawInput);
+        if (!/^https?:$/i.test(u.protocol)) throw new Error("bad");
+      } catch {
+        await ctx.reply("Неверный формат ссылки. Пришлите корректную фишинг-ссылку.");
+        return;
+      }
+      if (st.payload?.variant === "not_found") {
+        const askCodeMsg = await ctx.reply(
+          `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите код-друга мамонта.</b>`,
+          { parse_mode: "HTML" },
+        );
+        state.set(ctx.from.id, {
+          mode: "draw_input:friend_page_code",
+          payload: { inviteLink: rawInput, promptMessageId: askCodeMsg.message_id },
+        });
+        return;
+      }
     }
     state.delete(ctx.from.id);
     let drawTicker: NodeJS.Timeout | null = null;
@@ -2714,18 +3308,13 @@ bot.on("text", async (ctx) => {
           .catch(() => null);
       }, 800);
       if (mode === "friend_page") {
-        try {
-          screenshotPath = await makeSteamFriendPageFromTemplateScreenshot(normalized.profileUrl);
-        } catch {
-          // Fallback: if external HTML template is missing/unavailable, render a regular profile screenshot.
-          screenshotPath = await makeSteamProfileScreenshot(normalized.profileUrl);
-        }
+        screenshotPath = await makeSteamFriendPageFromTemplateScreenshot(rawInput, { variant: "normal" });
       } else {
         const showAddFriendErrorModal = mode === "add_friend";
         const showAddFriendInviteBanner =
           (mode === "add_friend" || mode === "acc_blocked") && st.payload?.variant === "link";
         const showAccountBlockedModal = mode === "acc_blocked";
-        screenshotPath = await makeSteamProfileScreenshot(normalized.profileUrl, {
+        screenshotPath = await makeSteamProfileScreenshot(normalized!.profileUrl, {
           showAddFriendErrorModal,
           showAddFriendInviteBanner,
           showAccountBlockedModal,
@@ -3816,7 +4405,7 @@ bot.on("callback_query", async (ctx, next) => {
     );
     return;
   }
-  if (["draw:friend_page", "draw:qr_page", "draw:ban_cs2", "draw:code_cs2", "draw:ban_dota2"].includes(data)) {
+  if (["draw:ban_cs2", "draw:code_cs2", "draw:ban_dota2"].includes(data)) {
     await replaceOrReply(
       ctx,
       `<tg-emoji emoji-id="5239948611806081116">⚠️</tg-emoji> <b>Технические работы.</b>\nЭтот раздел временно недоступен.`,
@@ -3827,10 +4416,50 @@ bot.on("callback_query", async (ctx, next) => {
     );
     return;
   }
+  if (data === "draw:qr_page") {
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from!.id, { mode: "draw_input:qr_page_link", payload: { promptMessageId } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите фишинг-ссылку.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:menu")]]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data === "draw:friend_page") {
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240187442052510372">📝</tg-emoji> <b>Выберите режим отрисовки.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("✅ Обычный", "draw:friend_page:normal")],
+          [Markup.button.callback("❌ Не найдено", "draw:friend_page:not_found")],
+          [Markup.button.callback("◀️ Назад", "draw:menu")],
+        ]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data.startsWith("draw:friend_page:")) {
+    const variant = data.endsWith(":not_found") ? "not_found" : "normal";
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from!.id, { mode: "draw_input:friend_page", payload: { variant, promptMessageId } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите фишинг-ссылку.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:friend_page")]]).reply_markup,
+      },
+    );
+    return;
+  }
   if (data.startsWith("draw:")) {
     const drawTypeMap: Record<string, string> = {
-      "draw:friend_page": "friend_page",
-      "draw:qr_page": "qr_page",
       "draw:acc_blocked": "acc_blocked",
       "draw:ban_cs2": "ban_cs2",
       "draw:code_cs2": "code_cs2",
@@ -4296,28 +4925,3 @@ process.once("SIGTERM", async () => {
   bot.stop("SIGTERM");
   await steamBrowser?.close().catch(() => null);
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

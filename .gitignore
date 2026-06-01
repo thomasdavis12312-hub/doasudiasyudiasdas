@@ -6,4 +6,6 @@ dist/
 *.log
 .env
 bot.db
+bot.db-shm
+bot.db-wal
 "@ | Out-File -Encoding utf8 .gitignore

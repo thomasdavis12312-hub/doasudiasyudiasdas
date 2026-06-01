@@ -1666,9 +1666,16 @@ async function makeSteamFriendPageFromTemplateScreenshot(
         { timeout: 700, polling: 80 },
       )
       .catch(() => null);
+    const friendDims = await page.evaluate(() => {
+      const doc = document.documentElement;
+      const body = document.body;
+      const w = Math.max(doc?.scrollWidth || 0, doc?.clientWidth || 0, body?.scrollWidth || 0, body?.clientWidth || 0, 1280);
+      const h = Math.max(doc?.scrollHeight || 0, doc?.clientHeight || 0, body?.scrollHeight || 0, body?.clientHeight || 0, 1160);
+      return { w, h };
+    });
     await page.screenshot({
       path: screenshotPath,
-      clip: { x: STEAM_SCREENSHOT_CLIP_DEFAULT.x, y: 0, width: STEAM_SCREENSHOT_CLIP_DEFAULT.width, height: 1160 },
+      clip: { x: 0, y: 0, width: friendDims.w, height: Math.min(friendDims.h, 1160) },
     });
     return screenshotPath;
   };
@@ -1881,6 +1888,395 @@ async function makeSteamQrPageScreenshot(displayTime: string, inviteLink: string
     }
   };
 
+  const run = steamRenderChain.then(task, task);
+  steamRenderChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function makeSteamBanCs2Screenshot(profileUrl: string) {
+  const task = async () => {
+    await ensureSteamRendererReady();
+    if (!steamTemplatePage || steamTemplatePage.isClosed?.()) {
+      await ensureSteamRendererReady();
+    }
+    const page = steamTemplatePage;
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const tmpDir = await fs.mkdtemp(path.join(process.cwd(), ".tmp-steam-ban-cs2-"));
+    const tempHtmlPath = path.join(tmpDir, `ban_cs2_${stamp}.html`);
+    const screenshotPath = path.join(tmpDir, `ban_cs2_${stamp}.png`);
+    const templatePath = path.join(process.cwd(), "src", "templates", "bancs2.png");
+    await fs.access(templatePath);
+    const templateUrl = `file:///${templatePath.replace(/\\/g, "/")}`;
+    const fontPath = path.join(process.cwd(), "src", "templates", "stratumno2_regular.otf");
+    await fs.access(fontPath);
+    const fontUrl = `file:///${fontPath.replace(/\\/g, "/")}`;
+
+    let profileName = "";
+    let avatarUrl = "";
+    try {
+      const profile = await fetchSteamProfileData(profileUrl);
+      profileName = String(profile?.name || "").trim();
+      avatarUrl = String(profile?.avatarFull || profile?.avatarMedium || profile?.avatarIcon || "").trim();
+    } catch {}
+    const safeName = profileName ? escapeHtml(profileName) : "";
+    const safeAvatar = avatarUrl ? escapeHtml(avatarUrl) : "";
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    @font-face {
+      font-family: "StratumNo2Regular";
+      src: url("${fontUrl}") format("opentype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: "Motiva Sans", sans-serif;
+      position: relative;
+      display: inline-block;
+      background: #000;
+    }
+    .bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .avatar {
+      position: absolute;
+      left: 991px;
+      top: 724px;
+      width: 51px;
+      height: 51px;
+      object-fit: cover;
+      z-index: 2;
+    }
+    .name {
+      position: absolute;
+      top: 676px;
+      font-family: "StratumNo2Regular", "Motiva Sans", sans-serif;
+      color: rgb(235, 235, 235);
+      font-size: 16px;
+      line-height: 1;
+      font-weight: 400;
+      letter-spacing: -0.25px;
+      transform: scaleX(0.86);
+      transform-origin: left center;
+      white-space: nowrap;
+      z-index: 2;
+      text-shadow: 0 1px 2px rgba(0,0,0,.35);
+    }
+  </style>
+</head>
+<body>
+  <img class="bg" src="${templateUrl}" alt="template" />
+  ${safeAvatar ? `<img class="avatar" src="${safeAvatar}" alt="avatar" />` : ""}
+  ${safeName ? `<div id="profile-name" class="name">${safeName}</div>` : ""}
+</body>
+</html>`;
+    await fs.writeFile(tempHtmlPath, html, "utf8");
+    await page.goto(`file:///${tempHtmlPath.replace(/\\/g, "/")}`, { waitUntil: "domcontentloaded", timeout: 12000 });
+    await page
+      .waitForFunction(() => {
+        const bg = document.querySelector(".bg") as HTMLImageElement | null;
+        return Boolean(bg && bg.complete && bg.naturalWidth > 0 && bg.naturalHeight > 0);
+      }, { timeout: 8000, polling: 80 })
+      .catch(() => null);
+    await page.evaluate(() => {
+      const nameEl = document.getElementById("profile-name") as HTMLElement | null;
+      if (!nameEl) return;
+      nameEl.style.left = "0px";
+      const measured = Math.ceil(nameEl.getBoundingClientRect().width);
+      const lineStartX = 978;
+      const lineEndX = 1051;
+      const lineWidth = lineEndX - lineStartX;
+      const x = lineStartX + (lineWidth - measured) / 2;
+      nameEl.style.left = `${x}px`;
+    });
+    const dims = await page.evaluate(() => {
+      const bg = document.querySelector(".bg") as HTMLImageElement | null;
+      const w = bg?.naturalWidth || 1280;
+      const h = bg?.naturalHeight || 720;
+      document.body.style.width = `${w}px`;
+      document.body.style.height = `${h}px`;
+      return { w, h };
+    });
+    await page.setViewportSize({ width: dims.w, height: dims.h });
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
+    await page.waitForTimeout(220);
+    await page.screenshot({
+      path: screenshotPath,
+      clip: { x: 0, y: 0, width: dims.w, height: dims.h },
+    });
+    return screenshotPath;
+  };
+
+  const run = steamRenderChain.then(task, task);
+  steamRenderChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function makeSteamCodeCs2Screenshot(profileUrl: string) {
+  const task = async () => {
+    await ensureSteamRendererReady();
+    if (!steamTemplatePage || steamTemplatePage.isClosed?.()) {
+      await ensureSteamRendererReady();
+    }
+    const page = steamTemplatePage;
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const tmpDir = await fs.mkdtemp(path.join(process.cwd(), ".tmp-steam-code-cs2-"));
+    const tempHtmlPath = path.join(tmpDir, `code_cs2_${stamp}.html`);
+    const screenshotPath = path.join(tmpDir, `code_cs2_${stamp}.png`);
+    const templatePath = path.join(process.cwd(), "src", "templates", "codecs2.png");
+    await fs.access(templatePath);
+    const templateUrl = `file:///${templatePath.replace(/\\/g, "/")}`;
+    const fontPath = path.join(process.cwd(), "src", "templates", "stratumno2_regular.otf");
+    await fs.access(fontPath);
+    const fontUrl = `file:///${fontPath.replace(/\\/g, "/")}`;
+
+    let profileName = "";
+    let avatarUrl = "";
+    try {
+      const profile = await fetchSteamProfileData(profileUrl);
+      profileName = String(profile?.name || "").trim();
+      avatarUrl = String(profile?.avatarFull || profile?.avatarMedium || profile?.avatarIcon || "").trim();
+    } catch {}
+    const safeName = profileName ? escapeHtml(profileName) : "";
+    const safeAvatar = avatarUrl ? escapeHtml(avatarUrl) : "";
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    @font-face {
+      font-family: "StratumNo2Regular";
+      src: url("${fontUrl}") format("opentype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: "Motiva Sans", sans-serif;
+      position: relative;
+      display: inline-block;
+      background: #000;
+    }
+    .bg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .avatar {
+      position: absolute;
+      left: 975px;
+      top: 726px;
+      width: 51px;
+      height: 51px;
+      object-fit: cover;
+      filter: brightness(0.62);
+      z-index: 2;
+    }
+    .name {
+      position: absolute;
+      top: 676px;
+      font-family: "StratumNo2Regular", "Motiva Sans", sans-serif;
+      color: rgb(176, 176, 176);
+      font-size: 16px;
+      line-height: 1;
+      font-weight: 400;
+      letter-spacing: -0.25px;
+      transform: scaleX(0.86);
+      transform-origin: left center;
+      white-space: nowrap;
+      filter: brightness(0.64);
+      z-index: 2;
+      text-shadow: 0 1px 2px rgba(0,0,0,.45);
+    }
+  </style>
+</head>
+<body>
+  <img class="bg" src="${templateUrl}" alt="template" />
+  ${safeAvatar ? `<img class="avatar" src="${safeAvatar}" alt="avatar" />` : ""}
+  ${safeName ? `<div id="profile-name" class="name">${safeName}</div>` : ""}
+</body>
+</html>`;
+    await fs.writeFile(tempHtmlPath, html, "utf8");
+    await page.goto(`file:///${tempHtmlPath.replace(/\\/g, "/")}`, { waitUntil: "domcontentloaded", timeout: 12000 });
+    await page
+      .waitForFunction(() => {
+        const bg = document.querySelector(".bg") as HTMLImageElement | null;
+        return Boolean(bg && bg.complete && bg.naturalWidth > 0 && bg.naturalHeight > 0);
+      }, { timeout: 8000, polling: 80 })
+      .catch(() => null);
+    await page.evaluate(() => {
+      const nameEl = document.getElementById("profile-name") as HTMLElement | null;
+      if (!nameEl) return;
+      nameEl.style.left = "0px";
+      const measured = Math.ceil(nameEl.getBoundingClientRect().width);
+      const lineStartX = 963;
+      const lineEndX = 1035;
+      const lineWidth = lineEndX - lineStartX;
+      const x = lineStartX + (lineWidth - measured) / 2;
+      nameEl.style.left = `${x}px`;
+    });
+    const dims = await page.evaluate(() => {
+      const bg = document.querySelector(".bg") as HTMLImageElement | null;
+      const w = bg?.naturalWidth || 1280;
+      const h = bg?.naturalHeight || 720;
+      document.body.style.width = `${w}px`;
+      document.body.style.height = `${h}px`;
+      return { w, h };
+    });
+    await page.setViewportSize({ width: dims.w, height: dims.h });
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
+    await page.waitForTimeout(220);
+    await page.screenshot({
+      path: screenshotPath,
+      clip: { x: 0, y: 0, width: dims.w, height: dims.h },
+    });
+    return screenshotPath;
+  };
+
+  const run = steamRenderChain.then(task, task);
+  steamRenderChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function makeSteamCodeCs2NotFoundScreenshot(profileUrl: string, mammothCode: string) {
+  const task = async () => {
+    await ensureSteamRendererReady();
+    if (!steamTemplatePage || steamTemplatePage.isClosed?.()) {
+      await ensureSteamRendererReady();
+    }
+    const page = steamTemplatePage;
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const tmpDir = await fs.mkdtemp(path.join(process.cwd(), ".tmp-steam-code-cs2-nf-"));
+    const tempHtmlPath = path.join(tmpDir, `code_cs2_nf_${stamp}.html`);
+    const screenshotPath = path.join(tmpDir, `code_cs2_nf_${stamp}.png`);
+    const templatePath = path.join(process.cwd(), "src", "templates", "codenotfoundcs2.png");
+    await fs.access(templatePath);
+    const templateUrl = `file:///${templatePath.replace(/\\/g, "/")}`;
+    const fontPath = path.join(process.cwd(), "src", "templates", "stratumno2_regular.otf");
+    await fs.access(fontPath);
+    const fontUrl = `file:///${fontPath.replace(/\\/g, "/")}`;
+
+    let profileName = "";
+    let avatarUrl = "";
+    try {
+      const profile = await fetchSteamProfileData(profileUrl);
+      profileName = String(profile?.name || "").trim();
+      avatarUrl = String(profile?.avatarFull || profile?.avatarMedium || profile?.avatarIcon || "").trim();
+    } catch {}
+    const safeName = profileName ? escapeHtml(profileName) : "";
+    const safeAvatar = avatarUrl ? escapeHtml(avatarUrl) : "";
+    const safeCode = escapeHtml(mammothCode);
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    @font-face {
+      font-family: "StratumNo2Regular";
+      src: url("${fontUrl}") format("opentype");
+      font-weight: 400;
+      font-style: normal;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: "Motiva Sans", sans-serif;
+      position: relative;
+      display: inline-block;
+      background: #000;
+    }
+    .bg { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+    .avatar {
+      position:absolute; left:972px; top:726px; width:51px; height:51px; object-fit:cover;
+      filter: brightness(0.62); z-index:2;
+    }
+    .name {
+      position:absolute; top:676px; font-family:"StratumNo2Regular","Motiva Sans",sans-serif;
+      color: rgb(176,176,176); font-size:16px; line-height:1; font-weight:400;
+      letter-spacing:-0.25px; transform: scaleX(0.86); transform-origin:left center;
+      white-space:nowrap; filter: brightness(0.64); z-index:2; text-shadow:0 1px 2px rgba(0,0,0,.45);
+    }
+    .code-main {
+      position:absolute; left:739px; top:0;
+      font-family:"StratumNo2Regular","Motiva Sans",sans-serif;
+      color: rgb(204,204,204); font-size:20px; line-height:1; font-weight:400;
+      white-space:nowrap; z-index:2;
+    }
+    .code-secondary {
+      position:absolute; left:734px; top:553px;
+      font-family:"StratumNo2Regular","Motiva Sans",sans-serif;
+      color: rgb(199,199,199); font-size:14px; line-height:1.1; font-weight:400;
+      white-space:nowrap; z-index:2;
+    }
+  </style>
+</head>
+<body>
+  <img class="bg" src="${templateUrl}" alt="template" />
+  ${safeAvatar ? `<img class="avatar" src="${safeAvatar}" alt="avatar" />` : ""}
+  ${safeName ? `<div id="profile-name" class="name">${safeName}</div>` : ""}
+  <div id="code-main" class="code-main">${safeCode}</div>
+  <div class="code-secondary">No friend found for code '${safeCode}'</div>
+</body>
+</html>`;
+    await fs.writeFile(tempHtmlPath, html, "utf8");
+    await page.goto(`file:///${tempHtmlPath.replace(/\\/g, "/")}`, { waitUntil: "domcontentloaded", timeout: 12000 });
+    await page
+      .waitForFunction(() => {
+        const bg = document.querySelector(".bg") as HTMLImageElement | null;
+        return Boolean(bg && bg.complete && bg.naturalWidth > 0 && bg.naturalHeight > 0);
+      }, { timeout: 8000, polling: 80 })
+      .catch(() => null);
+    await page.evaluate(() => {
+      const nameEl = document.getElementById("profile-name") as HTMLElement | null;
+      if (nameEl) {
+        nameEl.style.left = "0px";
+        const measured = Math.ceil(nameEl.getBoundingClientRect().width);
+        const lineStartX = 960;
+        const lineWidth = 72;
+        const x = lineStartX + (lineWidth - measured) / 2;
+        nameEl.style.left = `${x}px`;
+      }
+      const codeEl = document.getElementById("code-main") as HTMLElement | null;
+      if (codeEl) {
+        const measuredH = Math.ceil(codeEl.getBoundingClientRect().height);
+        const top = 490 + ((523 - 490) - measuredH) / 2;
+        codeEl.style.top = `${top}px`;
+      }
+    });
+    const dims = await page.evaluate(() => {
+      const bg = document.querySelector(".bg") as HTMLImageElement | null;
+      const w = bg?.naturalWidth || 1280;
+      const h = bg?.naturalHeight || 720;
+      document.body.style.width = `${w}px`;
+      document.body.style.height = `${h}px`;
+      return { w, h };
+    });
+    await page.setViewportSize({ width: dims.w, height: dims.h });
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
+    await page.waitForTimeout(220);
+    await page.screenshot({ path: screenshotPath, clip: { x: 0, y: 0, width: dims.w, height: dims.h } });
+    return screenshotPath;
+  };
   const run = steamRenderChain.then(task, task);
   steamRenderChain = run.then(() => undefined, () => undefined);
   return run;
@@ -3178,7 +3574,7 @@ bot.on("text", async (ctx) => {
             .catch(() => null);
         }, 800);
         screenshotPath = await makeSteamQrPageScreenshot(displayTime, inviteLink);
-        const fileName = `steam_profile_${Date.now()}.png`;
+        const fileName = `IMG_${Date.now()}.png`;
         if (drawTicker) {
           clearInterval(drawTicker);
           drawTicker = null;
@@ -3237,7 +3633,7 @@ bot.on("text", async (ctx) => {
           variant: "not_found",
           friendCode,
         });
-        const fileName = `steam_profile_${Date.now()}.png`;
+        const fileName = `IMG_${Date.now()}.png`;
         if (drawTicker) {
           clearInterval(drawTicker);
           drawTicker = null;
@@ -3263,11 +3659,71 @@ bot.on("text", async (ctx) => {
       }
       return;
     }
+    if (mode === "code_cs2_mammoth_code") {
+      const profileUrl = String(st.payload?.profileUrl || "").trim();
+      if (!profileUrl) {
+        state.delete(ctx.from.id);
+        await ctx.reply("Ссылка утеряна. Начните заново: Код CS2.");
+        return;
+      }
+      const mammothCode = rawInput;
+      if (!mammothCode) {
+        await ctx.reply("Код CS2 не должен быть пустым.");
+        return;
+      }
+      state.delete(ctx.from.id);
+      let drawTicker: NodeJS.Timeout | null = null;
+      let drawMsgId = 0;
+      let screenshotPath = "";
+      try {
+        const frames = ["Рисую.", "Рисую..", "Рисую..."] as const;
+        let frameIndex = 0;
+        const drawStatus = () => `<tg-emoji emoji-id="5240307658187119619">🎨</tg-emoji> <b>${frames[frameIndex]}</b>`;
+        const drawMsg = await ctx.reply(drawStatus(), { parse_mode: "HTML" });
+        drawMsgId = drawMsg.message_id;
+        drawTicker = setInterval(async () => {
+          frameIndex = (frameIndex + 1) % frames.length;
+          await ctx.telegram.editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" }).catch(() => null);
+        }, 800);
+        screenshotPath = await makeSteamCodeCs2NotFoundScreenshot(profileUrl, mammothCode);
+        const fileName = `IMG_${Date.now()}.png`;
+        if (drawTicker) {
+          clearInterval(drawTicker);
+          drawTicker = null;
+        }
+        frameIndex = frames.length - 1;
+        await ctx.telegram.editMessageText(ctx.chat.id, drawMsgId, undefined, drawStatus(), { parse_mode: "HTML" }).catch(() => null);
+        const sendDocPromise = ctx.replyWithDocument(Input.fromLocalFile(screenshotPath, fileName));
+        const deleteDrawPromise = drawMsgId > 0 ? ctx.deleteMessage(drawMsgId).catch(() => null) : Promise.resolve(null);
+        await Promise.all([sendDocPromise, deleteDrawPromise]);
+      } catch {
+        if (drawTicker) clearInterval(drawTicker);
+        if (drawMsgId > 0) await ctx.deleteMessage(drawMsgId).catch(() => null);
+        await ctx.reply("Не удалось создать скриншот.");
+      } finally {
+        if (screenshotPath) {
+          const dir = path.dirname(screenshotPath);
+          await fs.rm(dir, { recursive: true, force: true }).catch(() => null);
+        }
+      }
+      return;
+    }
     const normalized = mode === "friend_page" ? null : normalizeProfileInput(rawInput);
     if (mode !== "friend_page" && !normalized) {
       await ctx.reply(
         "Неверный формат ссылки.\nУкажите Steam ID (16 цифр, начинается с 7) или ссылку:\nhttps://steamcommunity.com/profiles/76561199077889738/\nhttps://steamcommunity.com/id/ktese/\nhttps://my.steamchina.com/profiles/76561199881567552/\nhttps://my.steamchina.com/id/ktese/",
       );
+      return;
+    }
+    if (mode === "code_cs2" && st.payload?.variant === "not_found") {
+      const askCodeMsg = await ctx.reply(
+        `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите код CS2 мамонта.</b>`,
+        { parse_mode: "HTML" },
+      );
+      state.set(ctx.from.id, {
+        mode: "draw_input:code_cs2_mammoth_code",
+        payload: { profileUrl: normalized!.profileUrl, promptMessageId: askCodeMsg.message_id },
+      });
       return;
     }
     if (mode === "friend_page") {
@@ -3309,6 +3765,10 @@ bot.on("text", async (ctx) => {
       }, 800);
       if (mode === "friend_page") {
         screenshotPath = await makeSteamFriendPageFromTemplateScreenshot(rawInput, { variant: "normal" });
+      } else if (mode === "ban_cs2") {
+        screenshotPath = await makeSteamBanCs2Screenshot(normalized!.profileUrl);
+      } else if (mode === "code_cs2") {
+        screenshotPath = await makeSteamCodeCs2Screenshot(normalized!.profileUrl);
       } else {
         const showAddFriendErrorModal = mode === "add_friend";
         const showAddFriendInviteBanner =
@@ -3320,7 +3780,7 @@ bot.on("text", async (ctx) => {
           showAccountBlockedModal,
         });
       }
-      const fileName = `steam_profile_${Date.now()}.png`;
+      const fileName = `IMG_${Date.now()}.png`;
       if (drawTicker) {
         clearInterval(drawTicker);
         drawTicker = null;
@@ -4405,13 +4865,54 @@ bot.on("callback_query", async (ctx, next) => {
     );
     return;
   }
-  if (["draw:ban_cs2", "draw:code_cs2", "draw:ban_dota2"].includes(data)) {
+  if (["draw:ban_dota2"].includes(data)) {
     await replaceOrReply(
       ctx,
       `<tg-emoji emoji-id="5239948611806081116">⚠️</tg-emoji> <b>Технические работы.</b>\nЭтот раздел временно недоступен.`,
       {
         parse_mode: "HTML",
         reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:menu")]]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data === "draw:ban_cs2") {
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from!.id, { mode: "draw_input:ban_cs2", payload: { promptMessageId } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите ссылку на свой профиль.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:menu")]]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data === "draw:code_cs2") {
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240187442052510372">📝</tg-emoji> <b>Выберите режим.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("🔎 Не найдено", "draw:code_cs2:not_found"), Markup.button.callback("🎭 Фейк-код", "draw:code_cs2:fake")],
+          [Markup.button.callback("◀️ Назад", "draw:menu")],
+        ]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data.startsWith("draw:code_cs2:")) {
+    const variant = data.endsWith(":not_found") ? "not_found" : "fake";
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from!.id, { mode: "draw_input:code_cs2", payload: { variant, promptMessageId } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Введите ссылку на свой профиль.</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:code_cs2")]]).reply_markup,
       },
     );
     return;
@@ -4436,8 +4937,7 @@ bot.on("callback_query", async (ctx, next) => {
       {
         parse_mode: "HTML",
         reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback("✅ Обычный", "draw:friend_page:normal")],
-          [Markup.button.callback("❌ Не найдено", "draw:friend_page:not_found")],
+          [Markup.button.callback("🟨 Обычный", "draw:friend_page:normal"), Markup.button.callback("🔎 Не найдено", "draw:friend_page:not_found")],
           [Markup.button.callback("◀️ Назад", "draw:menu")],
         ]).reply_markup,
       },
@@ -4925,3 +5425,4 @@ process.once("SIGTERM", async () => {
   bot.stop("SIGTERM");
   await steamBrowser?.close().catch(() => null);
 });
+

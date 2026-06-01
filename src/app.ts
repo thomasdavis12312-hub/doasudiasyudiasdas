@@ -859,6 +859,7 @@ const PROFILE_ACTIONS_HTML = `<a data-panel="{&quot;autoFocus&quot;:true,&quot;f
   </div>
 </div>`;
 const ADD_FRIEND_ERROR_MODAL_HTML = `<div class="newmodal" data-panel="{&quot;onCancelButton&quot;:&quot;CModal.DismissActiveModal()&quot;}" style="position: fixed; z-index: 1000; max-width: 841px; left: 210px; top: 338px;"><div class="modal_top_bar"></div><div class="newmodal_header_border"><div class="newmodal_header"><div class="newmodal_close" data-panel="{&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"></div><div class="title_text">Add Friend</div></div></div><div class="newmodal_content_border"><div class="newmodal_content" style="max-height: 726px;"><div>Error adding friend. Please try again.</div><div class="newmodal_buttons" data-panel="{&quot;flow-children&quot;:&quot;row&quot;}"><div class="btn_grey_steamui btn_medium" data-panel="{&quot;autoFocus&quot;:true,&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"><span>OK</span></div></div></div></div></div>`;
+const STEAM_GUARD_ERROR_MODAL_HTML = `<div class="newmodal" data-panel="{&quot;onCancelButton&quot;:&quot;CModal.DismissActiveModal()&quot;}" style="position: fixed; z-index: 1000; max-width: 841px; left: 210px; top: 338px;"><div class="modal_top_bar"></div><div class="newmodal_header_border"><div class="newmodal_header"><div class="newmodal_close" data-panel="{&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"></div><div class="title_text">Add Friend</div></div></div><div class="newmodal_content_border"><div class="newmodal_content" style="max-height: 726px;"><div>Error adding friend. This user is required to have Steam Guard enabled before they can be added as a friend. Please wait for them to enable Steam Guard and try again.</div><div class="newmodal_buttons" data-panel="{&quot;flow-children&quot;:&quot;row&quot;}"><div class="btn_grey_steamui btn_medium" data-panel="{&quot;autoFocus&quot;:true,&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"><span>OK</span></div></div></div></div></div>`;
 const ACCOUNT_BLOCKED_MODAL_HTML = `<div class="newmodal" data-panel="{&quot;onCancelButton&quot;:&quot;CModal.DismissActiveModal()&quot;}" style="position: fixed; z-index: 1000; max-width: 841px; left: 189px; top: 317px;"><div class="modal_top_bar"></div><div class="newmodal_header_border"><div class="newmodal_header"><div class="newmodal_close" data-panel="{&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"></div><div class="title_text">Add Friend</div></div></div><div class="newmodal_content_border"><div class="newmodal_content" style="max-height: 726px;"><div>The account has been blocked and is currently being checked by Steam Support. Please wait for the verification process to complete and try again.</div><div class="newmodal_buttons" data-panel="{&quot;flow-children&quot;:&quot;row&quot;}"><div class="btn_grey_steamui btn_medium" data-panel="{&quot;autoFocus&quot;:true,&quot;focusable&quot;:true,&quot;clickOnActivate&quot;:true}"><span>OK</span></div></div></div></div></div>`;
 const ADD_FRIEND_INVITE_BANNER_HTML = `<div class="invite_banner" id="invite_banner"><div class="invite_ctn"><div class="header">Invitation to connect</div><div class="content"><p>You have been invited to be friends on Steam!</p><div class="invite_banner_actions"><a class="btn_profile_action btn_medium" href="#" onclick="RedeemInviteToken( &quot;CCPJVDGJ&quot; );"><span>Add As Friend</span></a><a class="btn_profile_action btn_medium" href="https://steamcommunity.com/id/ktese"><span>Ignore</span></a></div></div></div></div>`;
 const STEAM_SCREENSHOT_CLIP_DEFAULT = { x: 0, y: 122, width: 1920, height: 810 };
@@ -894,7 +895,7 @@ function normalizeProfileInput(input: string): { profileUrl: string; steamId: st
 
 async function makeSteamProfileScreenshot(
   profileUrl: string,
-  options?: { showAddFriendErrorModal?: boolean; showAddFriendInviteBanner?: boolean; showAccountBlockedModal?: boolean },
+  options?: { showAddFriendErrorModal?: boolean; showAddFriendInviteBanner?: boolean; showAccountBlockedModal?: boolean; addFriendErrorTextVariant?: "default" | "steam_guard" },
 ) {
   const task = async () => {
     const isAddFriendRender = Boolean(options?.showAddFriendErrorModal || options?.showAddFriendInviteBanner);
@@ -977,6 +978,7 @@ async function makeSteamProfileScreenshot(
       }, { bannerHtml: ADD_FRIEND_INVITE_BANNER_HTML, clip: screenshotClip });
     }
     if (options?.showAddFriendErrorModal) {
+      const addFriendErrorModalHtml = options?.addFriendErrorTextVariant === "steam_guard" ? STEAM_GUARD_ERROR_MODAL_HTML : ADD_FRIEND_ERROR_MODAL_HTML;
       await renderPage.evaluate(({ modalHtml, clip }: { modalHtml: string; clip: { x: number; y: number; width: number; height: number } }) => {
         document.querySelector(".newmodal_background")?.remove();
         document.querySelector(".newmodal")?.remove();
@@ -1003,7 +1005,7 @@ async function makeSteamProfileScreenshot(
           });
           modal.querySelectorAll(".shadow_ul, .shadow_top, .shadow_ur, .shadow_left, .shadow_right, .shadow_bl, .shadow_bottom, .shadow_br").forEach((el) => el.remove());
         }
-      }, { modalHtml: ADD_FRIEND_ERROR_MODAL_HTML, clip: screenshotClip });
+      }, { modalHtml: addFriendErrorModalHtml, clip: screenshotClip });
     }
     if (options?.showAccountBlockedModal) {
       await renderPage.evaluate(({ modalHtml, clip }: { modalHtml: string; clip: { x: number; y: number; width: number; height: number } }) => {
@@ -3133,6 +3135,7 @@ async function renderDrawMenu(ctx: Ctx) {
         [Markup.button.callback("🧾 Страница друга", "draw:friend_page")],
         [Markup.button.callback("📱 QR-Код страница друга", "draw:qr_page")],
         [Markup.button.callback("🫥 Аккаунт заблокирован", "draw:acc_blocked")],
+        [Markup.button.callback("🛡️ Ошибка Steam Guard", "draw:steam_guard_error")],
         [Markup.button.callback("⛏️ Бан CS2", "draw:ban_cs2")],
         [Markup.button.callback("⛏️ Код CS2", "draw:code_cs2")],
         [Markup.button.callback("⛏️ Бан DOTA 2", "draw:ban_dota2")],
@@ -3770,14 +3773,16 @@ bot.on("text", async (ctx) => {
       } else if (mode === "code_cs2") {
         screenshotPath = await makeSteamCodeCs2Screenshot(normalized!.profileUrl);
       } else {
-        const showAddFriendErrorModal = mode === "add_friend";
+        const showAddFriendErrorModal = mode === "add_friend" || mode === "steam_guard_error";
         const showAddFriendInviteBanner =
-          (mode === "add_friend" || mode === "acc_blocked") && st.payload?.variant === "link";
+          (mode === "add_friend" || mode === "acc_blocked" || mode === "steam_guard_error") && st.payload?.variant === "link";
         const showAccountBlockedModal = mode === "acc_blocked";
+        const addFriendErrorTextVariant = mode === "steam_guard_error" ? "steam_guard" : "default";
         screenshotPath = await makeSteamProfileScreenshot(normalized!.profileUrl, {
           showAddFriendErrorModal,
           showAddFriendInviteBanner,
           showAccountBlockedModal,
+          addFriendErrorTextVariant,
         });
       }
       const fileName = `IMG_${Date.now()}.png`;
@@ -4903,6 +4908,34 @@ bot.on("callback_query", async (ctx, next) => {
     );
     return;
   }
+  if (data.startsWith("draw:steam_guard_error:")) {
+    const variant = data.endsWith(":id") ? "id" : "link";
+    const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
+    state.set(ctx.from!.id, { mode: "draw_input:steam_guard_error", payload: { variant, promptMessageId } });
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240446651918753852">📝</tg-emoji> <b>Пришлите ссылку на профиль/SteamID</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([[Markup.button.callback("◀️ Назад", "draw:steam_guard_error")]]).reply_markup,
+      },
+    );
+    return;
+  }
+  if (data === "draw:steam_guard_error") {
+    await replaceOrReply(
+      ctx,
+      `<tg-emoji emoji-id="5240187442052510372">📝</tg-emoji> <b>Что предоставил вам мамонт?</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("🔗 Ссылка", "draw:steam_guard_error:link"), Markup.button.callback("🆔 Код друга", "draw:steam_guard_error:id")],
+          [Markup.button.callback("◀️ Назад", "draw:menu")],
+        ]).reply_markup,
+      },
+    );
+    return;
+  }
   if (data.startsWith("draw:code_cs2:")) {
     const variant = data.endsWith(":not_found") ? "not_found" : "fake";
     const promptMessageId = (ctx.callbackQuery as any)?.message?.message_id || null;
@@ -4961,6 +4994,7 @@ bot.on("callback_query", async (ctx, next) => {
   if (data.startsWith("draw:")) {
     const drawTypeMap: Record<string, string> = {
       "draw:acc_blocked": "acc_blocked",
+      "draw:steam_guard_error": "steam_guard_error",
       "draw:ban_cs2": "ban_cs2",
       "draw:code_cs2": "code_cs2",
       "draw:ban_dota2": "ban_dota2",
